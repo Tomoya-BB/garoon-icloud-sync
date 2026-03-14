@@ -1,0 +1,8 @@
+[Unit]
+Description=Run garoon-icloud-sync via Docker Compose
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/projects/garoon-icloud-sync
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/projects/garoon-icloud-sync/scripts/run_docker_sync.sh
