@@ -1,0 +1,16 @@
+services:
+  garoon-sync:
+    container_name: garoon-sync
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: garoon-icloud-sync:local
+    working_dir: /app
+    environment:
+      TZ: Asia/Tokyo
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./.env:/app/.env:ro
+      - ./data:/app/data
+    command: ["python", "-m", "src.main"]
+    init: true

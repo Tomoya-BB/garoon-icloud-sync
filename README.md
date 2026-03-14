@@ -69,6 +69,74 @@ source .venv/bin/activate
 CALDAV_DRY_RUN=true python -m src.main
 ```
 
+## Docker 実行
+
+ローカル Python 実行フローはそのまま残しつつ、`docker compose run --rm garoon-sync` で同じ処理をコンテナ内に閉じ込めて実行できます。Docker 構成では、ホスト側の `.env` を `/app/.env` に read-only bind mount し、`data/` を `/app/data` へ bind mount します。これにより、認証情報をイメージへ焼き込まず、同期結果や診断ファイルだけをホストへ永続化できます。
+
+この構成の前提:
+
+- サービス名は `garoon-sync`
+- コンテナの作業ディレクトリは `/app`
+- デフォルト実行コマンドは `python -m src.main`
+- タイムゾーンは `Asia/Tokyo`
+- 永続化対象は `data/events.json`、`data/calendar.ics`、`data/sync_plan.json`、`data/caldav_sync_result.json`、`data/sync_state.json`、`data/diagnostics/`、`data/reports/`、`data/backups/`
+
+初回準備:
+
+```bash
+cp .env.example .env
+mkdir -p data/diagnostics data/reports data/backups
+docker compose build garoon-sync
+```
+
+手動実行:
+
+```bash
+docker compose run --rm garoon-sync
+```
+
+補助スクリプトを使う場合:
+
+```bash
+./scripts/run_docker_sync.sh
+```
+
+引数を渡すと、`docker compose run --rm garoon-sync ...` の override としてそのまま実行できます。たとえばコンテナ内でテストを走らせる場合は次のようにします。
+
+```bash
+./scripts/run_docker_sync.sh pytest
+```
+
+Mac での運用メモ:
+
+- Docker Desktop など、`docker` と `docker compose` が使える状態にしてから上記コマンドを実行してください
+- Apple Silicon / Intel のどちらでも、同じ `docker compose` 手順で確認できます
+
+Raspberry Pi OS 64bit Lite での運用メモ:
+
+- ARM64 向けでも扱いやすいシンプルな Python slim ベースイメージを使っています
+- Raspberry Pi 側でもリポジトリと `.env`、`data/` をそのまま持っていけば、同じ `docker compose build garoon-sync` と `docker compose run --rm garoon-sync` で実行できます
+- 先に Mac 上で `CALDAV_DRY_RUN=true` の確認を済ませてから Raspberry Pi へ持っていくと安全です
+- 30 分ごとの定期実行は `systemd --user` + timer を前提にし、unit ファイルは `deploy/systemd/user/garoon-sync.service` と `deploy/systemd/user/garoon-sync.timer` に置いています
+
+Docker 実行時の注意:
+
+- `.env` はホスト側ファイルを `/app/.env` へ read-only mount し、`python -m src.main` が通常どおり読み込みます
+- `OUTPUT_JSON_PATH=data/events.json` のような相対パスは `/app` 基準で解決されるため、出力は bind mount 済みの `/app/data` に揃います
+- `sync_state.json` や診断レポートをコンテナ内に閉じ込めないため、`data/` は named volume ではなく bind mount にしています
+- 既存の `python -m src.main` / `pytest` によるローカル実行は、Docker を使わずこれまで通り継続できます
+
+## systemd timer 運用
+
+Raspberry Pi 上での常駐運用は、Docker Compose の既存手動フローをそのまま残したまま `systemd --user` の oneshot service + timer で `./scripts/run_docker_sync.sh` を定期実行する構成を想定しています。
+
+- service: `deploy/systemd/user/garoon-sync.service`
+- timer: `deploy/systemd/user/garoon-sync.timer`
+- 実行間隔: `OnBootSec=5min`、`OnUnitActiveSec=30min`、`Persistent=true`
+- 詳細手順: `docs/raspberry-pi-operation.md`
+
+`systemd --user` でログアウト後も timer を動かすには、`loginctl enable-linger tomoya` を設定してください。配置方法、ログ確認、dry-run での確認手順、初回同期時の注意点は `docs/raspberry-pi-operation.md` にまとめています。
+
 成功すると、取得件数と保存先が標準出力に表示され、次の 5 ファイルが UTF-8 で保存されます。
 
 - JSON: `OUTPUT_JSON_PATH`。デフォルトは `data/events.json`
