@@ -117,6 +117,7 @@ Raspberry Pi OS 64bit Lite での運用メモ:
 - ARM64 向けでも扱いやすいシンプルな Python slim ベースイメージを使っています
 - Raspberry Pi 側でもリポジトリと `.env`、`data/` をそのまま持っていけば、同じ `docker compose build garoon-sync` と `docker compose run --rm garoon-sync` で実行できます
 - 先に Mac 上で `CALDAV_DRY_RUN=true` の確認を済ませてから Raspberry Pi へ持っていくと安全です
+- 30 分ごとの定期実行は `systemd --user` + timer を前提にし、unit ファイルは `deploy/systemd/user/garoon-sync.service` と `deploy/systemd/user/garoon-sync.timer` に置いています
 
 Docker 実行時の注意:
 
@@ -124,6 +125,17 @@ Docker 実行時の注意:
 - `OUTPUT_JSON_PATH=data/events.json` のような相対パスは `/app` 基準で解決されるため、出力は bind mount 済みの `/app/data` に揃います
 - `sync_state.json` や診断レポートをコンテナ内に閉じ込めないため、`data/` は named volume ではなく bind mount にしています
 - 既存の `python -m src.main` / `pytest` によるローカル実行は、Docker を使わずこれまで通り継続できます
+
+## systemd timer 運用
+
+Raspberry Pi 上での常駐運用は、Docker Compose の既存手動フローをそのまま残したまま `systemd --user` の oneshot service + timer で `./scripts/run_docker_sync.sh` を定期実行する構成を想定しています。
+
+- service: `deploy/systemd/user/garoon-sync.service`
+- timer: `deploy/systemd/user/garoon-sync.timer`
+- 実行間隔: `OnBootSec=5min`、`OnUnitActiveSec=30min`、`Persistent=true`
+- 詳細手順: `docs/raspberry-pi-operation.md`
+
+`systemd --user` でログアウト後も timer を動かすには、`loginctl enable-linger tomoya` を設定してください。配置方法、ログ確認、dry-run での確認手順、初回同期時の注意点は `docs/raspberry-pi-operation.md` にまとめています。
 
 成功すると、取得件数と保存先が標準出力に表示され、次の 5 ファイルが UTF-8 で保存されます。
 
