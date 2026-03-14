@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from src.models import EventDateTime, EventRecord
+from src.models import DateRange, EventDateTime, EventRecord
 from src.sync_plan import SyncActionType, build_sync_plan, summarize_sync_plan_actions
 from src.sync_state import (
     EventSyncState,
@@ -137,6 +137,7 @@ def test_build_sync_plan_maps_unchanged_event_to_skip_action() -> None:
 
 
 def test_build_sync_plan_maps_missing_event_to_delete_action() -> None:
+    fetch_window = _fetch_window()
     previous_state = SyncState(
         events={
             "evt-missing": EventSyncState(
@@ -147,11 +148,13 @@ def test_build_sync_plan_maps_missing_event_to_delete_action() -> None:
                 sequence=9,
                 is_deleted=False,
                 last_synced_at="2026-03-10T12:00:00+00:00",
+                last_seen_window_start="2026-03-11T00:00:00+00:00",
+                last_seen_window_end="2026-03-11T23:59:59+00:00",
             )
         }
     )
 
-    diff = diff_events([], previous_state, synced_at=_synced_at())
+    diff = diff_events([], previous_state, synced_at=_synced_at(), fetch_window=fetch_window)
     plan = build_sync_plan(diff, generated_at=_synced_at())
 
     assert plan.actions[0].action is SyncActionType.DELETE
@@ -199,6 +202,7 @@ def test_build_sync_plan_creates_distinct_actions_for_recurring_occurrences() ->
 
 
 def test_summarize_sync_plan_actions_counts_each_action_type() -> None:
+    fetch_window = _fetch_window()
     event_new = _build_event(event_id="evt-new", updated_at="2026-03-11T01:00:00Z")
     event_updated = _build_event(event_id="evt-updated", updated_at="2026-03-11T02:00:00Z")
     event_same = _build_event(event_id="evt-same", updated_at="2026-03-11T03:00:00Z")
@@ -232,6 +236,8 @@ def test_summarize_sync_plan_actions_counts_each_action_type() -> None:
                 sequence=9,
                 is_deleted=False,
                 last_synced_at="2026-03-10T12:00:00+00:00",
+                last_seen_window_start="2026-03-11T00:00:00+00:00",
+                last_seen_window_end="2026-03-11T23:59:59+00:00",
             ),
         }
     )
@@ -240,6 +246,7 @@ def test_summarize_sync_plan_actions_counts_each_action_type() -> None:
         [event_new, event_updated, event_same],
         previous_state,
         synced_at=_synced_at(),
+        fetch_window=fetch_window,
     )
     plan = build_sync_plan(diff, generated_at=_synced_at())
     summary = summarize_sync_plan_actions(plan)
@@ -283,3 +290,10 @@ def _build_event(
 
 def _synced_at() -> datetime:
     return datetime(2026, 3, 11, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _fetch_window() -> DateRange:
+    return DateRange(
+        start=datetime(2026, 3, 11, 0, 0, 0, tzinfo=timezone.utc),
+        end=datetime(2026, 3, 11, 23, 59, 59, tzinfo=timezone.utc),
+    )
