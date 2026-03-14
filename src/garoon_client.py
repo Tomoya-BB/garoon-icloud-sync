@@ -9,6 +9,8 @@ import requests
 
 from src.models import DateRange, EventRecord
 
+_GAROON_FETCH_PAGE_SIZE = 100
+
 
 class GaroonClientError(RuntimeError):
     """Base exception for Garoon client failures."""
@@ -71,20 +73,59 @@ class GaroonClient:
             "rangeStart": date_range.start.isoformat(timespec="seconds"),
             "rangeEnd": date_range.end.isoformat(timespec="seconds"),
             "orderBy": "start asc",
+            "limit": _GAROON_FETCH_PAGE_SIZE,
         }
         if target_user:
             # TODO: Confirm whether the target user should be user ID, code, or login name in your tenant.
             params["target"] = target_user
             params["targetType"] = "user"
 
-        response = self._request("GET", "/api/v1/schedule/events", params=params)
-        raw_events = response.get("events")
-        if not isinstance(raw_events, list):
-            raise GaroonApiResponseError(
-                "Garoon API response did not include an 'events' list."
-            )
+        events_by_id: dict[str, EventRecord] = {}
+        offset = 0
+        page = 1
 
-        events = [EventRecord.from_garoon_dict(event) for event in raw_events if isinstance(event, dict)]
+        while True:
+            response = self._request(
+                "GET",
+                "/api/v1/schedule/events",
+                params={**params, "offset": offset},
+            )
+            raw_events = response.get("events")
+            if not isinstance(raw_events, list):
+                raise GaroonApiResponseError(
+                    "Garoon API response did not include an 'events' list."
+                )
+
+            for event in raw_events:
+                if not isinstance(event, dict):
+                    continue
+                normalized_event = EventRecord.from_garoon_dict(event)
+                if normalized_event.event_id in events_by_id:
+                    self._logger.warning(
+                        "Garoon API returned a duplicate event occurrence; keeping the later payload. "
+                        "event_id=%s page=%s",
+                        normalized_event.event_id,
+                        page,
+                    )
+                events_by_id[normalized_event.event_id] = normalized_event
+
+            has_next = response.get("hasNext")
+            if has_next is None:
+                has_next = len(raw_events) >= _GAROON_FETCH_PAGE_SIZE
+            if not isinstance(has_next, bool):
+                raise GaroonApiResponseError(
+                    "Garoon API response field 'hasNext' must be a boolean when present."
+                )
+            if not has_next:
+                break
+            if not raw_events:
+                raise GaroonApiResponseError(
+                    "Garoon API reported additional pages but returned an empty 'events' list."
+                )
+            offset += _GAROON_FETCH_PAGE_SIZE
+            page += 1
+
+        events = list(events_by_id.values())
         self._logger.info("Fetched %s events from Garoon.", len(events))
         return events
 

@@ -63,11 +63,14 @@ class EventRecord:
     attendees: list[Attendee] = field(default_factory=list)
     facilities: list[Facility] = field(default_factory=list)
     raw: dict[str, Any] | None = None
+    garoon_event_id: str | None = None
 
     @classmethod
     def from_garoon_dict(cls, payload: dict[str, Any]) -> "EventRecord":
         raw_attendees = payload.get("attendees")
         raw_facilities = payload.get("facilities")
+        raw_event_id = str(payload.get("id", ""))
+        repeat_id = _read_nested(payload, "repeatId")
         attendees = [
             _parse_attendee(attendee)
             for attendee in raw_attendees
@@ -80,7 +83,7 @@ class EventRecord:
         ] if isinstance(raw_facilities, list) else []
 
         return cls(
-            event_id=str(payload.get("id", "")),
+            event_id=build_garoon_event_key(raw_event_id, repeat_id),
             subject=str(payload.get("subject", "")),
             start=_parse_event_datetime(payload.get("start")),
             end=_parse_event_datetime(payload.get("end")),
@@ -94,11 +97,12 @@ class EventRecord:
             updated_at=_read_nested(payload, "updatedAt"),
             original_start_time_zone=_read_nested(payload, "originalStartTimeZone"),
             original_end_time_zone=_read_nested(payload, "originalEndTimeZone"),
-            repeat_id=_read_nested(payload, "repeatId"),
+            repeat_id=repeat_id,
             repeat_info=payload.get("repeatInfo") if isinstance(payload.get("repeatInfo"), dict) else None,
             attendees=attendees,
             facilities=facilities,
             raw=payload,
+            garoon_event_id=raw_event_id or None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -137,6 +141,14 @@ def _read_nested(payload: dict[str, Any], *keys: str) -> Any:
             return None
         current = current.get(key)
     return current
+
+
+def build_garoon_event_key(raw_event_id: str, repeat_id: Any) -> str:
+    normalized_event_id = str(raw_event_id).strip()
+    normalized_repeat_id = str(repeat_id).strip() if repeat_id is not None else ""
+    if normalized_event_id and normalized_repeat_id:
+        return f"{normalized_event_id}:{normalized_repeat_id}"
+    return normalized_event_id
 
 
 def _parse_event_datetime(payload: Any) -> EventDateTime | None:

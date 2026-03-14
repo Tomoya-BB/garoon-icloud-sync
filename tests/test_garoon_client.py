@@ -18,13 +18,16 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, response: FakeResponse) -> None:
-        self.response = response
+    def __init__(self, response: FakeResponse | list[FakeResponse]) -> None:
+        self.responses = response if isinstance(response, list) else [response]
         self.last_request: dict[str, Any] | None = None
+        self.requests: list[dict[str, Any]] = []
 
     def request(self, **kwargs: Any) -> FakeResponse:
         self.last_request = kwargs
-        return self.response
+        self.requests.append(kwargs)
+        index = min(len(self.requests) - 1, len(self.responses) - 1)
+        return self.responses[index]
 
 
 def test_fetch_events_normalizes_response() -> None:
@@ -90,4 +93,78 @@ def test_fetch_events_normalizes_response() -> None:
     assert session.last_request["url"] == "https://example.cybozu.com/g/api/v1/schedule/events"
     assert session.last_request["params"]["target"] == "7"
     assert session.last_request["params"]["targetType"] == "user"
+    assert session.last_request["params"]["limit"] == 100
+    assert session.last_request["params"]["offset"] == 0
     assert session.last_request["headers"]["X-Cybozu-Authorization"] == "dXNlcjpwYXNz"
+
+
+def test_fetch_events_paginates_until_has_next_is_false() -> None:
+    first_page = FakeResponse(
+        status_code=200,
+        payload={
+            "events": [
+                {"id": "evt-1", "subject": "Page 1"},
+                {"id": "evt-2", "subject": "Page 1"},
+            ],
+            "hasNext": True,
+        },
+    )
+    second_page = FakeResponse(
+        status_code=200,
+        payload={
+            "events": [
+                {"id": "evt-3", "subject": "Page 2"},
+            ],
+            "hasNext": False,
+        },
+    )
+    session = FakeSession([first_page, second_page])
+    client = GaroonClient(
+        base_url="https://example.cybozu.com/g",
+        auth_strategy=PasswordAuthStrategy("user", "pass"),
+        session=session,
+    )
+
+    events = client.fetch_events(
+        date_range=DateRange(
+            start=datetime.fromisoformat("2026-03-11T00:00:00+09:00"),
+            end=datetime.fromisoformat("2026-03-11T23:59:59+09:00"),
+        )
+    )
+
+    assert [event.event_id for event in events] == ["evt-1", "evt-2", "evt-3"]
+    assert [request["params"]["offset"] for request in session.requests] == [0, 100]
+
+
+def test_fetch_events_uses_repeat_id_to_build_occurrence_specific_event_id() -> None:
+    session = FakeSession(
+        FakeResponse(
+            status_code=200,
+            payload={
+                "events": [
+                    {
+                        "id": "42",
+                        "repeatId": "202603110100",
+                        "subject": "Weekly sync",
+                    }
+                ],
+                "hasNext": False,
+            },
+        )
+    )
+    client = GaroonClient(
+        base_url="https://example.cybozu.com/g",
+        auth_strategy=PasswordAuthStrategy("user", "pass"),
+        session=session,
+    )
+
+    events = client.fetch_events(
+        date_range=DateRange(
+            start=datetime.fromisoformat("2026-03-11T00:00:00+09:00"),
+            end=datetime.fromisoformat("2026-03-11T23:59:59+09:00"),
+        )
+    )
+
+    assert events[0].event_id == "42:202603110100"
+    assert events[0].garoon_event_id == "42"
+    assert events[0].repeat_id == "202603110100"

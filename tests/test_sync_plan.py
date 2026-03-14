@@ -174,6 +174,30 @@ def test_build_sync_plan_uses_event_menu_when_subject_is_blank() -> None:
     assert plan.actions[0].summary == "MTG"
 
 
+def test_build_sync_plan_creates_distinct_actions_for_recurring_occurrences() -> None:
+    first = _build_event(
+        event_id="evt-series:202603180100",
+        repeat_id="202603180100",
+        garoon_event_id="evt-series",
+        updated_at="2026-03-11T05:00:00Z",
+    )
+    second = _build_event(
+        event_id="evt-series:202603250100",
+        repeat_id="202603250100",
+        garoon_event_id="evt-series",
+        updated_at="2026-03-11T05:00:00Z",
+    )
+
+    diff = diff_events([first, second], SyncState.empty(), synced_at=_synced_at())
+    plan = build_sync_plan(diff, generated_at=_synced_at())
+
+    assert [action.event_id for action in plan.actions] == [
+        "evt-series:202603180100",
+        "evt-series:202603250100",
+    ]
+    assert all(action.action is SyncActionType.CREATE for action in plan.actions)
+
+
 def test_summarize_sync_plan_actions_counts_each_action_type() -> None:
     event_new = _build_event(event_id="evt-new", updated_at="2026-03-11T01:00:00Z")
     event_updated = _build_event(event_id="evt-updated", updated_at="2026-03-11T02:00:00Z")
@@ -231,6 +255,8 @@ def _build_event(
     event_id: str = "evt-1",
     subject: str = "Planning",
     updated_at: str | None = "2026-03-11T00:00:00Z",
+    repeat_id: str | None = None,
+    garoon_event_id: str | None = None,
 ) -> EventRecord:
     return EventRecord(
         event_id=event_id,
@@ -247,10 +273,11 @@ def _build_event(
         updated_at=updated_at,
         original_start_time_zone="Asia/Tokyo",
         original_end_time_zone="Asia/Tokyo",
-        repeat_id=None,
+        repeat_id=repeat_id,
         repeat_info=None,
         attendees=[],
         facilities=[],
+        garoon_event_id=garoon_event_id,
     )
 
 

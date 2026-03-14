@@ -396,6 +396,7 @@ def diff_events(
     updated_events: list[EventDiff] = []
     unchanged_events: list[EventDiff] = []
     current_event_ids = {event.event_id for event in events}
+    legacy_recurring_event_ids = _build_legacy_recurring_event_ids(events, previous_state)
 
     for event in events:
         prior = previous_state.events.get(event.event_id)
@@ -426,7 +427,11 @@ def diff_events(
     deleted_candidates = [
         event_state
         for event_id, event_state in sorted(previous_state.events.items())
-        if event_id not in current_event_ids and not event_state.is_deleted
+        if (
+            event_id not in current_event_ids
+            and event_id not in legacy_recurring_event_ids
+            and not event_state.is_deleted
+        )
     ]
 
     return SyncDiffResult(
@@ -611,6 +616,26 @@ def _resolve_ics_uid(
     if previous_tombstone is not None and previous_tombstone.ics_uid:
         return previous_tombstone.ics_uid
     return build_ics_uid(event_id)
+
+
+def _build_legacy_recurring_event_ids(
+    events: list[EventRecord],
+    previous_state: SyncState,
+) -> set[str]:
+    legacy_ids: set[str] = set()
+    previous_event_ids = set(previous_state.events)
+
+    for event in events:
+        if not event.repeat_id:
+            continue
+        if not event.garoon_event_id:
+            continue
+        if event.garoon_event_id == event.event_id:
+            continue
+        if event.garoon_event_id in previous_event_ids:
+            legacy_ids.add(event.garoon_event_id)
+
+    return legacy_ids
 
 
 def _normalize_event_datetime(value: EventDateTime | None) -> dict[str, str | None] | None:

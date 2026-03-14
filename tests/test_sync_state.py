@@ -390,6 +390,37 @@ def test_diff_events_reuses_tombstone_uid_for_reappeared_event() -> None:
     assert diff.new_events[0].next_state.etag is None
 
 
+def test_diff_events_skips_delete_for_legacy_recurring_state_key() -> None:
+    recurring_event = _build_event(
+        event_id="evt-series:202603180100",
+        updated_at="2026-03-11T06:00:00Z",
+        repeat_id="202603180100",
+        garoon_event_id="evt-series",
+    )
+    previous_state = SyncState(
+        events={
+            "evt-series": EventSyncState(
+                event_id="evt-series",
+                ics_uid="uid-legacy-series",
+                updated_at="2026-03-10T06:00:00Z",
+                content_hash="legacy-hash",
+                sequence=3,
+                is_deleted=False,
+                last_synced_at="2026-03-10T06:00:00+00:00",
+            )
+        }
+    )
+
+    diff = diff_events(
+        [recurring_event],
+        previous_state,
+        synced_at=datetime(2026, 3, 11, 6, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert [item.event.event_id for item in diff.new_events] == ["evt-series:202603180100"]
+    assert diff.deleted_candidates == []
+
+
 def test_build_next_sync_state_preserves_sequence_and_updates_timestamp() -> None:
     synced_at = datetime(2026, 3, 11, 5, 0, 0, tzinfo=timezone.utc)
     event = _build_event(event_id="evt-1", updated_at="2026-03-11T05:00:00Z")
@@ -1405,6 +1436,8 @@ def _build_event(
     subject: str = "Planning",
     updated_at: str | None = "2026-03-11T00:00:00Z",
     repeat_info: dict[str, str] | None = None,
+    repeat_id: str | None = None,
+    garoon_event_id: str | None = None,
     attendees: list[Attendee] | None = None,
     facilities: list[Facility] | None = None,
 ) -> EventRecord:
@@ -1423,10 +1456,11 @@ def _build_event(
         updated_at=updated_at,
         original_start_time_zone="Asia/Tokyo",
         original_end_time_zone="Asia/Tokyo",
-        repeat_id=None,
+        repeat_id=repeat_id,
         repeat_info=repeat_info,
         attendees=attendees or [],
         facilities=facilities or [],
+        garoon_event_id=garoon_event_id,
     )
 
 
