@@ -9,6 +9,7 @@ from typing import Mapping
 from src.models import EventRecord
 
 DEFAULT_ICS_PATH = Path(__file__).resolve().parent.parent / "data" / "calendar.ics"
+_START_ONLY_FALLBACK_DURATION = timedelta(minutes=30)
 
 
 def build_calendar(
@@ -127,9 +128,18 @@ def _build_date_range(event: EventRecord) -> list[str] | None:
         ]
 
     lines = [f"DTSTART:{_format_datetime(start)}"]
-    if event.end:
-        lines.append(f"DTEND:{_format_datetime(event.end.as_datetime())}")
+    end = _resolve_timed_event_end(event, start)
+    if end is not None:
+        lines.append(f"DTEND:{_format_datetime(end)}")
     return lines
+
+
+def _resolve_timed_event_end(event: EventRecord, start: datetime) -> datetime | None:
+    if event.end is not None:
+        return event.end.as_datetime()
+    if event.is_start_only:
+        return start + _START_ONLY_FALLBACK_DURATION
+    return None
 
 
 def _resolve_all_day_end_date(start: datetime, end: datetime | None) -> date:

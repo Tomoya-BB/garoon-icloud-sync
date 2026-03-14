@@ -115,6 +115,96 @@ def test_build_calendar_renders_all_day_event_as_value_date() -> None:
     assert "LAST-MODIFIED:20260301T080000Z\r\n" in calendar
 
 
+def test_build_calendar_fills_dtend_for_start_only_event_without_end() -> None:
+    event = EventRecord(
+        event_id="start-only-1",
+        subject="Quick Sync",
+        start=EventDateTime(date_time="2026-03-11T10:00:00+09:00", time_zone="Asia/Tokyo"),
+        end=None,
+        is_all_day=False,
+        is_start_only=True,
+        event_type="normal",
+        event_menu="MTG",
+        visibility_type="public",
+        notes=None,
+        created_at=None,
+        updated_at=None,
+        original_start_time_zone="Asia/Tokyo",
+        original_end_time_zone=None,
+        repeat_id=None,
+        repeat_info=None,
+        facilities=[],
+    )
+
+    calendar = build_calendar(
+        [event],
+        generated_at=datetime(2026, 3, 11, 0, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert "DTSTART:20260311T010000Z\r\n" in calendar
+    assert "DTEND:20260311T013000Z\r\n" in calendar
+
+
+def test_build_calendar_does_not_fill_dtend_for_non_start_only_event_without_end() -> None:
+    event = EventRecord(
+        event_id="timed-no-end",
+        subject="No End Yet",
+        start=EventDateTime(date_time="2026-03-11T10:00:00+09:00", time_zone="Asia/Tokyo"),
+        end=None,
+        is_all_day=False,
+        is_start_only=False,
+        event_type="normal",
+        event_menu="MTG",
+        visibility_type="public",
+        notes=None,
+        created_at=None,
+        updated_at=None,
+        original_start_time_zone="Asia/Tokyo",
+        original_end_time_zone=None,
+        repeat_id=None,
+        repeat_info=None,
+        facilities=[],
+    )
+
+    calendar = build_calendar(
+        [event],
+        generated_at=datetime(2026, 3, 11, 0, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert "DTSTART:20260311T010000Z\r\n" in calendar
+    assert "DTEND:" not in calendar
+
+
+def test_build_calendar_fills_dtend_for_recurring_start_only_event_without_end() -> None:
+    event = EventRecord(
+        event_id="series-1:202603180100",
+        subject="Recurring Quick Sync",
+        start=EventDateTime(date_time="2026-03-18T10:00:00+09:00", time_zone="Asia/Tokyo"),
+        end=None,
+        is_all_day=False,
+        is_start_only=True,
+        event_type="normal",
+        event_menu="MTG",
+        visibility_type="public",
+        notes=None,
+        created_at=None,
+        updated_at=None,
+        original_start_time_zone="Asia/Tokyo",
+        original_end_time_zone=None,
+        repeat_id="202603180100",
+        repeat_info={"type": "weekly"},
+        facilities=[],
+    )
+
+    calendar = build_calendar(
+        [event],
+        generated_at=datetime(2026, 3, 11, 0, 0, 0, tzinfo=timezone.utc),
+    )
+
+    assert "DTSTART:20260318T010000Z\r\n" in calendar
+    assert "DTEND:20260318T013000Z\r\n" in calendar
+
+
 def test_build_calendar_summary_prefers_subject_over_event_menu() -> None:
     event = EventRecord(
         event_id="summary-subject",
