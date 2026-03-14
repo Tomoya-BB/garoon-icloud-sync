@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.caldav_client import CalDAVActionResult, CalDAVSyncReport
 from src.config import AppConfig
-from src.models import EventDateTime, EventRecord
+from src.models import DateRange, EventDateTime, EventRecord
 from src.sync_state import (
     EventSyncState,
     SyncStateJsonDecodeError,
@@ -107,6 +107,105 @@ def test_main_dry_run_does_not_save_sync_state(monkeypatch, tmp_path: Path) -> N
     assert exit_code == 0
     assert load_calls == [(tmp_path / "sync_state.json", False)]
     assert save_calls == []
+
+
+def test_main_dry_run_does_not_plan_delete_for_events_outside_current_fetch_window(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config = _build_app_config(
+        tmp_path,
+        dry_run=True,
+        start_days_offset=0,
+        end_days_offset=31,
+    )
+    normal_window = DateRange(
+        start=EventDateTime("2026-03-15T00:00:00+09:00").as_datetime(),
+        end=EventDateTime("2026-04-15T23:59:59+09:00").as_datetime(),
+    )
+    previous_state = SyncState(
+        events={
+            "evt-in-range": EventSyncState(
+                event_id="evt-in-range",
+                ics_uid="uid-in-range",
+                updated_at="2026-03-12T00:00:00Z",
+                content_hash=build_event_content_hash(_build_event("evt-in-range")),
+                sequence=1,
+                is_deleted=False,
+                last_synced_at="2026-03-10T00:00:00+00:00",
+                last_seen_window_start="2025-03-15T00:00:00+00:00",
+                last_seen_window_end="2026-09-14T23:59:59+00:00",
+            ),
+            "evt-out-of-range": EventSyncState(
+                event_id="evt-out-of-range",
+                ics_uid="uid-out-of-range",
+                updated_at="2026-03-10T00:00:00Z",
+                content_hash=build_event_content_hash(_build_event("evt-out-of-range")),
+                sequence=2,
+                is_deleted=False,
+                last_synced_at="2026-03-10T00:00:00+00:00",
+                last_seen_window_start="2025-03-15T00:00:00+00:00",
+                last_seen_window_end="2026-09-14T23:59:59+00:00",
+            ),
+        }
+    )
+    build_date_range_calls: list[tuple[int, int]] = []
+    saved_plans = []
+
+    monkeypatch.setattr(main_module, "load_config", lambda: config)
+    monkeypatch.setattr(main_module, "configure_logging", lambda level: None)
+    monkeypatch.setattr(
+        main_module,
+        "build_date_range",
+        lambda start_days_offset, end_days_offset: (
+            build_date_range_calls.append((start_days_offset, end_days_offset)) or normal_window
+        ),
+    )
+
+    class FakeGaroonClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def fetch_events(self, **kwargs) -> list[EventRecord]:
+            assert kwargs["date_range"] == normal_window
+            return [_build_event("evt-in-range")]
+
+    class FakeCalDAVClient:
+        def __init__(self, settings, *, logger=None) -> None:
+            self._settings = settings
+
+        def sync(self, sync_plan, sync_events, *, generated_at=None, previous_sync_state=None) -> CalDAVSyncReport:
+            assert sync_events == [_build_event("evt-in-range")]
+            assert previous_sync_state == previous_state.events
+            assert all(action.action.value != "delete" for action in sync_plan.actions)
+            return CalDAVSyncReport(
+                generated_at="2026-03-15T00:00:00+00:00",
+                dry_run=True,
+                calendar_name=self._settings.calendar_name,
+                source_url=self._settings.url,
+                processed_count=0,
+                ignored_count=len(sync_plan.actions),
+                results=[],
+            )
+
+    monkeypatch.setattr(main_module, "GaroonClient", FakeGaroonClient)
+    monkeypatch.setattr(main_module, "CalDAVClient", FakeCalDAVClient)
+    monkeypatch.setattr(main_module, "load_sync_state", lambda path, create_if_missing=True: previous_state)
+    monkeypatch.setattr(main_module, "save_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "write_calendar", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "save_sync_plan", lambda path, plan: saved_plans.append(plan))
+    monkeypatch.setattr(main_module, "save_caldav_sync_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "DEFAULT_SYNC_STATE_PATH", tmp_path / "sync_state.json")
+    monkeypatch.setattr(main_module, "DEFAULT_SYNC_PLAN_PATH", tmp_path / "sync_plan.json")
+    monkeypatch.setattr(main_module, "DEFAULT_CALDAV_SYNC_RESULT_PATH", tmp_path / "caldav_sync_result.json")
+    monkeypatch.setattr(main_module, "DEFAULT_ICS_PATH", tmp_path / "calendar.ics")
+
+    exit_code = main_module.main()
+
+    assert exit_code == 0
+    assert build_date_range_calls == [(0, 31)]
+    assert len(saved_plans) == 1
+    assert [action.action.value for action in saved_plans[0].actions] == ["skip"]
 
 
 def test_main_dry_run_does_not_warn_when_create_count_is_below_threshold(
@@ -267,12 +366,19 @@ def test_main_dry_run_warns_when_delete_count_reaches_threshold(
                 sequence=3,
                 is_deleted=False,
                 last_synced_at="2026-03-11T00:00:00+00:00",
+                last_seen_window_start="2026-03-11T00:00:00+00:00",
+                last_seen_window_end="2026-03-12T23:59:59+00:00",
             )
         }
+    )
+    fetch_window = DateRange(
+        start=EventDateTime("2026-03-11T00:00:00+00:00").as_datetime(),
+        end=EventDateTime("2026-03-12T23:59:59+00:00").as_datetime(),
     )
 
     monkeypatch.setattr(main_module, "load_config", lambda: config)
     monkeypatch.setattr(main_module, "configure_logging", lambda level: None)
+    monkeypatch.setattr(main_module, "build_date_range", lambda *_args: fetch_window)
 
     class FakeGaroonClient:
         def __init__(self, **kwargs) -> None:
@@ -1404,13 +1510,15 @@ def _build_app_config(
     dry_run: bool = False,
     create_warn_count: int = 10,
     delete_warn_count: int = 10,
+    start_days_offset: int = 0,
+    end_days_offset: int = 1,
 ) -> AppConfig:
     return AppConfig(
         garoon_base_url="https://garoon.example.com/g",
         garoon_username="user",
         garoon_password="pass",
-        garoon_start_days_offset=0,
-        garoon_end_days_offset=1,
+        garoon_start_days_offset=start_days_offset,
+        garoon_end_days_offset=end_days_offset,
         output_json_path=tmp_path / "events.json",
         log_level="INFO",
         caldav_url="https://caldav.example.com/principals/tomo",

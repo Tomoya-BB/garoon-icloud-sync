@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Iterable, Protocol
 
 from src.ics_writer import build_ics_uid
-from src.models import Attendee, EventDateTime, EventRecord, Facility
+from src.models import Attendee, DateRange, EventDateTime, EventRecord, Facility
 
 DEFAULT_SYNC_STATE_PATH = Path(__file__).resolve().parent.parent / "data" / "sync_state.json"
 STATE_VERSION = 3
@@ -65,6 +65,8 @@ class EventSyncState:
     sequence: int
     is_deleted: bool
     last_synced_at: str
+    last_seen_window_start: str | None = None
+    last_seen_window_end: str | None = None
     resource_url: str | None = None
     etag: str | None = None
     last_delivery_status: str | None = None
@@ -80,6 +82,8 @@ class EventSyncState:
             sequence=_coerce_int(payload.get("sequence")),
             is_deleted=bool(payload.get("is_deleted", False)),
             last_synced_at=str(payload.get("last_synced_at", "")),
+            last_seen_window_start=_optional_str(payload.get("last_seen_window_start")),
+            last_seen_window_end=_optional_str(payload.get("last_seen_window_end")),
             resource_url=_optional_str(payload.get("resource_url")),
             etag=_optional_str(payload.get("etag")),
             last_delivery_status=_optional_str(payload.get("last_delivery_status")),
@@ -355,6 +359,7 @@ def build_event_sync_state(
     previous_tombstone: TombstoneSyncState | None = None,
     synced_at: datetime | None = None,
     *,
+    fetch_window: DateRange | None = None,
     ics_uid: str | None = None,
     sequence: int | None = None,
     resource_url: str | None = None,
@@ -363,6 +368,10 @@ def build_event_sync_state(
     last_delivery_at: str | None = None,
 ) -> EventSyncState:
     timestamp = _format_timestamp(synced_at or datetime.now(timezone.utc))
+    last_seen_window_start, last_seen_window_end = _resolve_fetch_window_bounds(
+        fetch_window,
+        previous_state=previous_state,
+    )
     return EventSyncState(
         event_id=event.event_id,
         ics_uid=_resolve_ics_uid(
@@ -376,6 +385,8 @@ def build_event_sync_state(
         sequence=sequence if sequence is not None else resolve_sequence(previous_state),
         is_deleted=False,
         last_synced_at=timestamp,
+        last_seen_window_start=last_seen_window_start,
+        last_seen_window_end=last_seen_window_end,
         resource_url=_coalesce_optional_str(resource_url, previous_state, "resource_url"),
         etag=_coalesce_optional_str(etag, previous_state, "etag"),
         last_delivery_status=_coalesce_optional_str(
@@ -391,6 +402,8 @@ def diff_events(
     events: list[EventRecord],
     previous_state: SyncState,
     synced_at: datetime | None = None,
+    *,
+    fetch_window: DateRange | None = None,
 ) -> SyncDiffResult:
     new_events: list[EventDiff] = []
     updated_events: list[EventDiff] = []
@@ -407,6 +420,7 @@ def diff_events(
             previous_state=prior,
             previous_tombstone=prior_tombstone,
             synced_at=synced_at,
+            fetch_window=fetch_window,
             sequence=resolve_sequence(prior, status),
         )
         diff = EventDiff(
@@ -431,6 +445,7 @@ def diff_events(
             event_id not in current_event_ids
             and event_id not in legacy_recurring_event_ids
             and not event_state.is_deleted
+            and _is_delete_eligible(event_state, fetch_window=fetch_window)
         )
     ]
 
@@ -446,6 +461,8 @@ def build_next_sync_state(
     events: list[EventRecord],
     previous_state: SyncState,
     synced_at: datetime | None = None,
+    *,
+    fetch_window: DateRange | None = None,
 ) -> SyncState:
     current_event_ids = {event.event_id for event in events}
     event_states = {
@@ -469,6 +486,7 @@ def build_next_sync_state(
                     else None
                 ),
                 synced_at=synced_at,
+                fetch_window=fetch_window,
             )
             for event in events
         }
@@ -485,6 +503,8 @@ def build_next_sync_state_from_delivery(
     previous_state: SyncState,
     delivery_results: Iterable[DeliveryResult],
     synced_at: datetime | None = None,
+    *,
+    fetch_window: DateRange | None = None,
 ) -> SyncState:
     event_by_id = {event.event_id: event for event in events}
     event_states = dict(previous_state.events)
@@ -512,6 +532,7 @@ def build_next_sync_state_from_delivery(
                 previous_state=prior,
                 previous_tombstone=prior_tombstone,
                 synced_at=delivery_timestamp,
+                fetch_window=fetch_window,
                 ics_uid=result.ics_uid if prior is None else None,
                 sequence=_resolve_delivery_sequence(result),
                 resource_url=result.resource_url,
@@ -554,6 +575,20 @@ def build_next_sync_state_from_delivery(
             continue
         event_states[result.event_id] = corrected_state
         updated = True
+
+    if fetch_window is not None:
+        for event_id in event_by_id:
+            previous_event_state = event_states.get(event_id)
+            if previous_event_state is None:
+                continue
+            refreshed_state = _refresh_event_state_fetch_window(
+                previous_event_state,
+                fetch_window=fetch_window,
+            )
+            if refreshed_state == previous_event_state:
+                continue
+            event_states[event_id] = refreshed_state
+            updated = True
 
     if not updated:
         return previous_state
@@ -726,6 +761,8 @@ def _validate_event_state_entry(
     _validate_required_int_field(payload, "sequence", location=location, errors=errors)
     is_deleted = _validate_required_bool_field(payload, "is_deleted", location=location, errors=errors)
     _validate_required_string_field(payload, "last_synced_at", location=location, errors=errors)
+    _validate_optional_string_field(payload, "last_seen_window_start", location=location, errors=errors)
+    _validate_optional_string_field(payload, "last_seen_window_end", location=location, errors=errors)
     _validate_optional_string_field(payload, "resource_url", location=location, errors=errors)
     _validate_optional_string_field(payload, "etag", location=location, errors=errors)
     _validate_optional_string_field(payload, "last_delivery_status", location=location, errors=errors)
@@ -984,8 +1021,87 @@ def _apply_recovered_resource_metadata(
         sequence=previous_state.sequence,
         is_deleted=previous_state.is_deleted,
         last_synced_at=previous_state.last_synced_at,
+        last_seen_window_start=previous_state.last_seen_window_start,
+        last_seen_window_end=previous_state.last_seen_window_end,
         resource_url=resource_url,
         etag=etag,
         last_delivery_status=previous_state.last_delivery_status,
         last_delivery_at=previous_state.last_delivery_at,
     )
+
+
+def _resolve_fetch_window_bounds(
+    fetch_window: DateRange | None,
+    *,
+    previous_state: EventSyncState | None,
+) -> tuple[str | None, str | None]:
+    if fetch_window is not None:
+        return (
+            _format_timestamp(fetch_window.start),
+            _format_timestamp(fetch_window.end),
+        )
+    if previous_state is None:
+        return (None, None)
+    return (
+        previous_state.last_seen_window_start,
+        previous_state.last_seen_window_end,
+    )
+
+
+def _refresh_event_state_fetch_window(
+    event_state: EventSyncState,
+    *,
+    fetch_window: DateRange,
+) -> EventSyncState:
+    last_seen_window_start, last_seen_window_end = _resolve_fetch_window_bounds(
+        fetch_window,
+        previous_state=event_state,
+    )
+    if (
+        event_state.last_seen_window_start == last_seen_window_start
+        and event_state.last_seen_window_end == last_seen_window_end
+    ):
+        return event_state
+
+    return EventSyncState(
+        event_id=event_state.event_id,
+        ics_uid=event_state.ics_uid,
+        updated_at=event_state.updated_at,
+        content_hash=event_state.content_hash,
+        sequence=event_state.sequence,
+        is_deleted=event_state.is_deleted,
+        last_synced_at=event_state.last_synced_at,
+        last_seen_window_start=last_seen_window_start,
+        last_seen_window_end=last_seen_window_end,
+        resource_url=event_state.resource_url,
+        etag=event_state.etag,
+        last_delivery_status=event_state.last_delivery_status,
+        last_delivery_at=event_state.last_delivery_at,
+    )
+
+
+def _is_delete_eligible(
+    event_state: EventSyncState,
+    *,
+    fetch_window: DateRange | None,
+) -> bool:
+    if fetch_window is None:
+        return False
+    if event_state.last_seen_window_start is None or event_state.last_seen_window_end is None:
+        return False
+
+    observed_start = _try_parse_timestamp(event_state.last_seen_window_start)
+    observed_end = _try_parse_timestamp(event_state.last_seen_window_end)
+    if observed_start is None or observed_end is None:
+        return False
+
+    current_start = fetch_window.start.astimezone(timezone.utc)
+    current_end = fetch_window.end.astimezone(timezone.utc)
+    return current_start <= observed_start and current_end >= observed_end
+
+
+def _try_parse_timestamp(value: str) -> datetime | None:
+    try:
+        return _parse_timestamp(value)
+    except ValueError:
+        return None

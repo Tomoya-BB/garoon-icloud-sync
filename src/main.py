@@ -127,7 +127,12 @@ def main() -> int:
             print(f"Failed to load sync state from {DEFAULT_SYNC_STATE_PATH}: {exc}")
             return 1
         synced_at = datetime.now().astimezone()
-        diff = diff_events(events, sync_state, synced_at=synced_at)
+        diff = diff_events(
+            events,
+            sync_state,
+            synced_at=synced_at,
+            fetch_window=date_range,
+        )
         try:
             sync_plan = build_sync_plan(diff, generated_at=synced_at)
         except (OSError, ValueError) as exc:
@@ -195,6 +200,7 @@ def main() -> int:
                     sync_state,
                     caldav_report.results,
                     synced_at=synced_at,
+                    fetch_window=date_range,
                 )
             except SyncStateValidationError as exc:
                 print_sync_state_validation_failure(

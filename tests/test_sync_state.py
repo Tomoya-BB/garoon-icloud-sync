@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 import src.sync_state as sync_state_module
-from src.models import Attendee, EventDateTime, EventRecord, Facility
+from src.models import Attendee, DateRange, EventDateTime, EventRecord, Facility
 from src.sync_state import (
     EventSyncState,
     SyncState,
@@ -308,6 +308,10 @@ def test_build_event_content_hash_is_stable_for_equivalent_payloads() -> None:
 
 def test_diff_events_classifies_new_updated_unchanged_and_deleted_candidates() -> None:
     synced_at = datetime(2026, 3, 11, 0, 0, 0, tzinfo=timezone.utc)
+    fetch_window = _build_fetch_window(
+        start="2026-03-11T00:00:00+00:00",
+        end="2026-03-11T23:59:59+00:00",
+    )
     new_event = _build_event(event_id="evt-new", updated_at="2026-03-11T01:00:00Z")
     unchanged_event = _build_event(event_id="evt-same", updated_at="2026-03-11T02:00:00Z")
     updated_event = _build_event(event_id="evt-updated", subject="Updated", updated_at="2026-03-11T03:00:00Z")
@@ -340,6 +344,8 @@ def test_diff_events_classifies_new_updated_unchanged_and_deleted_candidates() -
                 sequence=1,
                 is_deleted=False,
                 last_synced_at="2026-03-10T12:00:00+00:00",
+                last_seen_window_start="2026-03-11T00:00:00+00:00",
+                last_seen_window_end="2026-03-11T23:59:59+00:00",
             ),
         }
     )
@@ -348,6 +354,7 @@ def test_diff_events_classifies_new_updated_unchanged_and_deleted_candidates() -
         [new_event, unchanged_event, updated_event],
         previous_state,
         synced_at=synced_at,
+        fetch_window=fetch_window,
     )
 
     assert [item.event.event_id for item in diff.new_events] == ["evt-new"]
@@ -379,6 +386,10 @@ def test_diff_events_reuses_tombstone_uid_for_reappeared_event() -> None:
         [event],
         previous_state,
         synced_at=datetime(2026, 3, 11, 5, 30, 0, tzinfo=timezone.utc),
+        fetch_window=_build_fetch_window(
+            start="2026-03-11T00:00:00+00:00",
+            end="2026-03-11T23:59:59+00:00",
+        ),
     )
 
     assert [item.event.event_id for item in diff.new_events] == ["evt-returned"]
@@ -415,14 +426,63 @@ def test_diff_events_skips_delete_for_legacy_recurring_state_key() -> None:
         [recurring_event],
         previous_state,
         synced_at=datetime(2026, 3, 11, 6, 0, 0, tzinfo=timezone.utc),
+        fetch_window=_build_fetch_window(
+            start="2026-03-11T00:00:00+00:00",
+            end="2026-03-11T23:59:59+00:00",
+        ),
     )
 
     assert [item.event.event_id for item in diff.new_events] == ["evt-series:202603180100"]
     assert diff.deleted_candidates == []
 
 
+def test_diff_events_does_not_delete_event_when_current_window_is_narrower_than_state_window() -> None:
+    broad_window = _build_fetch_window(
+        start="2025-03-15T00:00:00+00:00",
+        end="2026-09-14T23:59:59+00:00",
+    )
+    normal_window = _build_fetch_window(
+        start="2026-03-15T00:00:00+00:00",
+        end="2026-04-15T23:59:59+00:00",
+    )
+    previous_state = build_next_sync_state(
+        [_build_event(event_id="evt-in-range"), _build_event(event_id="evt-out-of-range")],
+        SyncState.empty(),
+        synced_at=datetime(2026, 3, 15, 0, 0, 0, tzinfo=timezone.utc),
+        fetch_window=broad_window,
+    )
+
+    diff = diff_events(
+        [_build_event(event_id="evt-in-range")],
+        previous_state,
+        synced_at=datetime(2026, 3, 16, 0, 0, 0, tzinfo=timezone.utc),
+        fetch_window=normal_window,
+    )
+
+    assert [item.event.event_id for item in diff.unchanged_events] == ["evt-in-range"]
+    assert diff.deleted_candidates == []
+
+
+def test_diff_events_does_not_delete_legacy_state_without_fetch_window_metadata() -> None:
+    diff = diff_events(
+        [],
+        SyncState(events={"evt-legacy": _build_event_state("evt-legacy")}),
+        synced_at=datetime(2026, 3, 16, 0, 0, 0, tzinfo=timezone.utc),
+        fetch_window=_build_fetch_window(
+            start="2026-03-15T00:00:00+00:00",
+            end="2026-04-15T23:59:59+00:00",
+        ),
+    )
+
+    assert diff.deleted_candidates == []
+
+
 def test_build_next_sync_state_preserves_sequence_and_updates_timestamp() -> None:
     synced_at = datetime(2026, 3, 11, 5, 0, 0, tzinfo=timezone.utc)
+    fetch_window = _build_fetch_window(
+        start="2026-03-11T00:00:00+00:00",
+        end="2026-03-11T23:59:59+00:00",
+    )
     event = _build_event(event_id="evt-1", updated_at="2026-03-11T05:00:00Z")
     previous_state = SyncState(
         events={
@@ -447,12 +507,19 @@ def test_build_next_sync_state_preserves_sequence_and_updates_timestamp() -> Non
         }
     )
 
-    next_state = build_next_sync_state([event], previous_state, synced_at=synced_at)
+    next_state = build_next_sync_state(
+        [event],
+        previous_state,
+        synced_at=synced_at,
+        fetch_window=fetch_window,
+    )
 
     _assert_sync_state_invariants(next_state)
     assert next_state.events["evt-1"].sequence == 7
     assert next_state.events["evt-1"].updated_at == "2026-03-11T05:00:00Z"
     assert next_state.events["evt-1"].last_synced_at == "2026-03-11T05:00:00+00:00"
+    assert next_state.events["evt-1"].last_seen_window_start == "2026-03-11T00:00:00+00:00"
+    assert next_state.events["evt-1"].last_seen_window_end == "2026-03-11T23:59:59+00:00"
     assert next_state.events["evt-missing"] == previous_state.events["evt-missing"]
 
 
@@ -514,12 +581,45 @@ def test_build_next_sync_state_from_delivery_updates_only_successful_create() ->
             )
         ],
         synced_at=synced_at,
+        fetch_window=_build_fetch_window(
+            start="2026-03-11T00:00:00+00:00",
+            end="2026-03-11T23:59:59+00:00",
+        ),
     )
 
     assert next_state.events["evt-create"].updated_at == "2026-03-11T06:00:00Z"
     assert next_state.events["evt-create"].sequence == 0
+    assert next_state.events["evt-create"].last_seen_window_start == "2026-03-11T00:00:00+00:00"
+    assert next_state.events["evt-create"].last_seen_window_end == "2026-03-11T23:59:59+00:00"
     assert next_state.events["evt-create"].last_delivery_status == "success"
     assert next_state.events["evt-create"].last_delivery_at == "2026-03-11T06:00:00+00:00"
+
+
+def test_build_next_sync_state_from_delivery_refreshes_fetch_window_for_skipped_event() -> None:
+    previous_state = SyncState(
+        events={
+            "evt-skip": _build_event_state(
+                "evt-skip",
+                last_seen_window_start="2025-03-15T00:00:00+00:00",
+                last_seen_window_end="2026-09-14T23:59:59+00:00",
+            )
+        }
+    )
+
+    next_state = build_next_sync_state_from_delivery(
+        [_build_event(event_id="evt-skip")],
+        previous_state,
+        [],
+        synced_at=datetime(2026, 3, 15, 0, 0, 0, tzinfo=timezone.utc),
+        fetch_window=_build_fetch_window(
+            start="2026-03-15T00:00:00+00:00",
+            end="2026-04-15T23:59:59+00:00",
+        ),
+    )
+
+    assert next_state.events["evt-skip"].last_synced_at == previous_state.events["evt-skip"].last_synced_at
+    assert next_state.events["evt-skip"].last_seen_window_start == "2026-03-15T00:00:00+00:00"
+    assert next_state.events["evt-skip"].last_seen_window_end == "2026-04-15T23:59:59+00:00"
 
 
 def test_build_next_sync_state_from_delivery_moves_reappeared_tombstone_to_active_event() -> None:
@@ -1473,6 +1573,8 @@ def _build_event_state(
     resource_url: str | None = None,
     etag: str | None = None,
     last_synced_at: str = "2026-03-10T00:00:00+00:00",
+    last_seen_window_start: str | None = None,
+    last_seen_window_end: str | None = None,
     last_delivery_status: str | None = "success",
     last_delivery_at: str | None = "2026-03-10T00:00:00+00:00",
 ) -> EventSyncState:
@@ -1485,6 +1587,8 @@ def _build_event_state(
         sequence=sequence,
         is_deleted=False,
         last_synced_at=last_synced_at,
+        last_seen_window_start=last_seen_window_start,
+        last_seen_window_end=last_seen_window_end,
         resource_url=resource_url,
         etag=etag,
         last_delivery_status=last_delivery_status,
@@ -1518,6 +1622,13 @@ def _assert_sync_state_invariants(state: SyncState) -> None:
     all_uids = [event_state.ics_uid for event_state in state.events.values()]
     all_uids.extend(tombstone.ics_uid for tombstone in state.tombstones.values())
     assert len(all_uids) == len(set(all_uids))
+
+
+def _build_fetch_window(*, start: str, end: str) -> DateRange:
+    return DateRange(
+        start=datetime.fromisoformat(start),
+        end=datetime.fromisoformat(end),
+    )
 
 
 @dataclass(frozen=True, slots=True)
