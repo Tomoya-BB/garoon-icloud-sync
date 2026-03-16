@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from src.config import ConfigError, load_config
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CALDAV_SYNC_RESULT_PATH = Path(__file__).resolve().parent.parent / "data" / "caldav_sync_result.json"
 
@@ -73,8 +75,13 @@ def build_summary_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--result-path",
-        default=str(DEFAULT_CALDAV_SYNC_RESULT_PATH),
-        help="Path to caldav_sync_result.json. Defaults to data/caldav_sync_result.json.",
+        default=None,
+        help="Path to caldav_sync_result.json. Defaults to the active profile data directory when --env-path is set.",
+    )
+    parser.add_argument(
+        "--env-path",
+        default=None,
+        help="Optional .env path used to resolve profile-specific default paths.",
     )
     return parser
 
@@ -84,10 +91,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        result_path = Path(args.result_path).expanduser().resolve()
+        config = load_config(args.env_path) if args.env_path is not None else None
+        result_path = _resolve_result_path(args.result_path, config=config)
         payload = load_caldav_sync_result(result_path)
     except FileNotFoundError as exc:
         print(f"inspection input file was not found: {exc.filename}", file=sys.stderr)
+        return 1
+    except ConfigError as exc:
+        print(f"Failed to resolve result path from config: {exc}", file=sys.stderr)
         return 1
     except (OSError, ValueError) as exc:
         print(f"Failed to summarize CalDAV sync result: {exc}", file=sys.stderr)
@@ -97,6 +108,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     _print_summary_report(result_path, summarize_create_conflicts(raw_results))
     _print_drift_summary_report(summarize_create_conflict_drift(raw_results))
     return 0
+
+
+def _resolve_result_path(result_path: str | None, *, config) -> Path:
+    if result_path is not None:
+        return Path(result_path).expanduser().resolve()
+    if config is not None and config.caldav_sync_result_path is not None:
+        return config.caldav_sync_result_path
+    return DEFAULT_CALDAV_SYNC_RESULT_PATH
 
 
 def load_caldav_sync_result(path: Path) -> dict[str, Any]:

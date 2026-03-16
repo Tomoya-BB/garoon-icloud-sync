@@ -4,8 +4,12 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 from dotenv import dotenv_values
+
+DEFAULT_PROFILE_NAME = "default"
+_PROFILE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class ConfigError(ValueError):
@@ -33,6 +37,18 @@ class AppConfig:
     caldav_diagnostic_dump_uid_lookup_json: bool = False
     garoon_target_user: str | None = None
     garoon_target_calendar: str | None = None
+    profile_name: str = DEFAULT_PROFILE_NAME
+    app_data_dir: Path | None = None
+    sync_state_path: Path | None = None
+    sync_plan_path: Path | None = None
+    caldav_sync_result_path: Path | None = None
+    ics_path: Path | None = None
+    diagnostics_dir: Path | None = None
+    reports_dir: Path | None = None
+    backups_dir: Path | None = None
+    logs_dir: Path | None = None
+    log_file_path: Path | None = None
+    run_summary_path: Path | None = None
 
 
 def load_config(env_path: str | Path = ".env") -> AppConfig:
@@ -47,7 +63,6 @@ def load_config(env_path: str | Path = ".env") -> AppConfig:
         "GAROON_PASSWORD",
         "GAROON_START_DAYS_OFFSET",
         "GAROON_END_DAYS_OFFSET",
-        "OUTPUT_JSON_PATH",
         "LOG_LEVEL",
         "CALDAV_URL",
         "CALDAV_USERNAME",
@@ -73,9 +88,25 @@ def load_config(env_path: str | Path = ".env") -> AppConfig:
             "GAROON_END_DAYS_OFFSET."
         )
 
-    output_json_path = Path(values["OUTPUT_JSON_PATH"]).expanduser()
-    if not output_json_path.is_absolute():
-        output_json_path = (env_dir / output_json_path).resolve()
+    profile_name = _normalize_profile_name(values.get("PROFILE_NAME"))
+    app_data_dir = _resolve_optional_path(values.get("APP_DATA_DIR"), env_dir=env_dir)
+    output_json_path = _resolve_output_json_path(
+        values.get("OUTPUT_JSON_PATH"),
+        env_dir=env_dir,
+        app_data_dir=app_data_dir,
+    )
+    data_dir = output_json_path.parent
+    runtime_dir = app_data_dir or _infer_runtime_dir(data_dir)
+    sync_state_path = data_dir / "sync_state.json"
+    sync_plan_path = data_dir / "sync_plan.json"
+    caldav_sync_result_path = data_dir / "caldav_sync_result.json"
+    ics_path = data_dir / "calendar.ics"
+    diagnostics_dir = data_dir / "diagnostics"
+    reports_dir = data_dir / "reports"
+    backups_dir = data_dir / "backups"
+    logs_dir = runtime_dir / "logs"
+    log_file_path = logs_dir / "garoon-icloud-sync.log"
+    run_summary_path = data_dir / "run_summary.json"
 
     return AppConfig(
         garoon_base_url=_normalize_url("GAROON_BASE_URL", values["GAROON_BASE_URL"]),
@@ -114,6 +145,18 @@ def load_config(env_path: str | Path = ".env") -> AppConfig:
         ),
         garoon_target_user=_empty_to_none(values.get("GAROON_TARGET_USER")),
         garoon_target_calendar=_empty_to_none(values.get("GAROON_TARGET_CALENDAR")),
+        profile_name=profile_name,
+        app_data_dir=runtime_dir,
+        sync_state_path=sync_state_path,
+        sync_plan_path=sync_plan_path,
+        caldav_sync_result_path=caldav_sync_result_path,
+        ics_path=ics_path,
+        diagnostics_dir=diagnostics_dir,
+        reports_dir=reports_dir,
+        backups_dir=backups_dir,
+        logs_dir=logs_dir,
+        log_file_path=log_file_path,
+        run_summary_path=run_summary_path,
     )
 
 
@@ -167,3 +210,48 @@ def _empty_to_none(value: object) -> str | None:
         return None
     stripped = str(value).strip()
     return stripped or None
+
+
+def _resolve_output_json_path(
+    raw_value: object,
+    *,
+    env_dir: Path,
+    app_data_dir: Path | None,
+) -> Path:
+    if raw_value is not None and str(raw_value).strip():
+        return _resolve_path(str(raw_value), env_dir=env_dir)
+    base_dir = app_data_dir or env_dir
+    return (base_dir / "data" / "events.json").resolve()
+
+
+def _resolve_optional_path(raw_value: object, *, env_dir: Path) -> Path | None:
+    if raw_value is None:
+        return None
+    normalized = str(raw_value).strip()
+    if not normalized:
+        return None
+    return _resolve_path(normalized, env_dir=env_dir)
+
+
+def _resolve_path(raw_value: str, *, env_dir: Path) -> Path:
+    path = Path(raw_value).expanduser()
+    if not path.is_absolute():
+        path = env_dir / path
+    return path.resolve()
+
+
+def _infer_runtime_dir(data_dir: Path) -> Path:
+    if data_dir.name == "data":
+        return data_dir.parent.resolve()
+    return data_dir.resolve()
+
+
+def _normalize_profile_name(raw_value: object) -> str:
+    if raw_value is None:
+        return DEFAULT_PROFILE_NAME
+    normalized = str(raw_value).strip()
+    if not normalized:
+        return DEFAULT_PROFILE_NAME
+    if not _PROFILE_NAME_PATTERN.fullmatch(normalized):
+        raise ConfigError("PROFILE_NAME must match ^[A-Za-z0-9][A-Za-z0-9._-]*$.")
+    return normalized

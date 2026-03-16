@@ -193,6 +193,7 @@ class CalDAVConnectionSettings:
     diagnostic_dump_success_ics: bool = False
     diagnostic_dump_uid_lookup_json: bool = False
     diagnostic_dir: Path | None = None
+    report_dir: Path | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1868,7 +1869,8 @@ class CalDAVClient:
             "comparison": comparison,
         }
 
-        path = DEFAULT_CALDAV_REPORTS_DIR / (
+        report_dir = self._settings.report_dir or DEFAULT_CALDAV_REPORTS_DIR
+        path = report_dir / (
             f"{self._build_create_conflict_state_drift_report_filename_base(item, recorded_at=recorded_at)}.json"
         )
         try:

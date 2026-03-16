@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config import ConfigError, load_config
+from src.config import DEFAULT_PROFILE_NAME, ConfigError, load_config
 
 
 def test_load_config_resolves_relative_output_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -159,3 +159,82 @@ def test_load_config_reads_caldav_diagnostic_flags(
     assert config.caldav_diagnostic_dump_failed_ics is True
     assert config.caldav_diagnostic_dump_success_ics is True
     assert config.caldav_diagnostic_dump_uid_lookup_json is True
+
+
+def test_load_config_builds_profile_runtime_paths_when_output_path_is_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "PROFILE_NAME=tomoya",
+                "APP_DATA_DIR=runtime/profiles/tomoya",
+                "GAROON_BASE_URL=https://example.cybozu.com/g",
+                "GAROON_USERNAME=test-user",
+                "GAROON_PASSWORD=test-pass",
+                "GAROON_START_DAYS_OFFSET=0",
+                "GAROON_END_DAYS_OFFSET=92",
+                "LOG_LEVEL=info",
+                "CALDAV_URL=https://caldav.example.com/",
+                "CALDAV_USERNAME=calendar-user",
+                "CALDAV_PASSWORD=calendar-pass",
+                "CALDAV_CALENDAR_NAME=PoC Calendar",
+                "CALDAV_DRY_RUN=false",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OUTPUT_JSON_PATH", raising=False)
+    monkeypatch.delenv("APP_DATA_DIR", raising=False)
+    monkeypatch.delenv("PROFILE_NAME", raising=False)
+
+    config = load_config(env_path)
+
+    runtime_dir = (tmp_path / "runtime" / "profiles" / "tomoya").resolve()
+    data_dir = runtime_dir / "data"
+    assert config.profile_name == "tomoya"
+    assert config.app_data_dir == runtime_dir
+    assert config.output_json_path == data_dir / "events.json"
+    assert config.sync_state_path == data_dir / "sync_state.json"
+    assert config.sync_plan_path == data_dir / "sync_plan.json"
+    assert config.caldav_sync_result_path == data_dir / "caldav_sync_result.json"
+    assert config.ics_path == data_dir / "calendar.ics"
+    assert config.diagnostics_dir == data_dir / "diagnostics"
+    assert config.reports_dir == data_dir / "reports"
+    assert config.backups_dir == data_dir / "backups"
+    assert config.logs_dir == runtime_dir / "logs"
+    assert config.run_summary_path == data_dir / "run_summary.json"
+
+
+def test_load_config_defaults_profile_name_when_unspecified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "\n".join(
+            [
+                "GAROON_BASE_URL=https://example.cybozu.com/g",
+                "GAROON_USERNAME=test-user",
+                "GAROON_PASSWORD=test-pass",
+                "GAROON_START_DAYS_OFFSET=0",
+                "GAROON_END_DAYS_OFFSET=92",
+                "LOG_LEVEL=info",
+                "CALDAV_URL=https://caldav.example.com/",
+                "CALDAV_USERNAME=calendar-user",
+                "CALDAV_PASSWORD=calendar-pass",
+                "CALDAV_CALENDAR_NAME=PoC Calendar",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PROFILE_NAME", raising=False)
+    monkeypatch.delenv("APP_DATA_DIR", raising=False)
+    monkeypatch.delenv("OUTPUT_JSON_PATH", raising=False)
+
+    config = load_config(env_path)
+
+    assert config.profile_name == DEFAULT_PROFILE_NAME
+    assert config.output_json_path == (tmp_path / "data" / "events.json").resolve()

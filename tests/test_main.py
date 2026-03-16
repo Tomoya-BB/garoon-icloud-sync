@@ -109,6 +109,93 @@ def test_main_dry_run_does_not_save_sync_state(monkeypatch, tmp_path: Path) -> N
     assert save_calls == []
 
 
+def test_main_writes_run_summary_and_history(monkeypatch, tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime" / "profiles" / "tomoya"
+    data_dir = runtime_dir / "data"
+    config = AppConfig(
+        garoon_base_url="https://garoon.example.com/g",
+        garoon_username="user",
+        garoon_password="pass",
+        garoon_start_days_offset=-30,
+        garoon_end_days_offset=120,
+        output_json_path=data_dir / "events.json",
+        log_level="INFO",
+        caldav_url="https://caldav.example.com/principals/tomo",
+        caldav_username="caldav-user",
+        caldav_password="caldav-pass",
+        caldav_calendar_name="PoC Calendar",
+        caldav_dry_run=True,
+        profile_name="tomoya",
+        app_data_dir=runtime_dir,
+        sync_state_path=data_dir / "sync_state.json",
+        sync_plan_path=data_dir / "sync_plan.json",
+        caldav_sync_result_path=data_dir / "caldav_sync_result.json",
+        ics_path=data_dir / "calendar.ics",
+        diagnostics_dir=data_dir / "diagnostics",
+        reports_dir=data_dir / "reports",
+        logs_dir=runtime_dir / "logs",
+        log_file_path=runtime_dir / "logs" / "garoon-icloud-sync.log",
+        run_summary_path=data_dir / "run_summary.json",
+    )
+    events = [_build_event("evt-1")]
+
+    monkeypatch.setattr(main_module, "load_config", lambda: config)
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+
+    class FakeGaroonClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def fetch_events(self, **kwargs) -> list[EventRecord]:
+            return events
+
+    class FakeCalDAVClient:
+        def __init__(self, settings, *, logger=None) -> None:
+            self._settings = settings
+
+        def sync(self, sync_plan, sync_events, *, generated_at=None, previous_sync_state=None) -> CalDAVSyncReport:
+            return CalDAVSyncReport(
+                generated_at="2026-03-12T00:00:00+00:00",
+                dry_run=True,
+                calendar_name=self._settings.calendar_name,
+                source_url=self._settings.url,
+                processed_count=1,
+                ignored_count=0,
+                results=[],
+            )
+
+    monkeypatch.setattr(main_module, "GaroonClient", FakeGaroonClient)
+    monkeypatch.setattr(main_module, "CalDAVClient", FakeCalDAVClient)
+    monkeypatch.setattr(
+        main_module,
+        "load_sync_state",
+        lambda path, create_if_missing=True, expected_profile=None: SyncState.empty(profile="tomoya"),
+    )
+    monkeypatch.setattr(main_module, "save_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "write_calendar", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "save_sync_plan", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "save_caldav_sync_report", lambda *args, **kwargs: None)
+
+    exit_code = main_module.main()
+
+    assert exit_code == 0
+    payload = json.loads((data_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert payload["profile"] == "tomoya"
+    assert payload["mode"] == "backfill"
+    assert payload["dry_run"] is True
+    assert payload["result"] == "success"
+    assert payload["counts"] == {
+        "create": 1,
+        "update": 0,
+        "delete": 0,
+        "skip": 0,
+    }
+    warning_codes = {warning["code"] for warning in payload["warnings"]}
+    assert "BACKFILL_WINDOW" in warning_codes
+    history_files = list((data_dir / "diagnostics" / "run_summaries").glob("run_summary-*.json"))
+    assert len(history_files) == 1
+
+
 def test_main_dry_run_does_not_plan_delete_for_events_outside_current_fetch_window(
     monkeypatch,
     tmp_path: Path,

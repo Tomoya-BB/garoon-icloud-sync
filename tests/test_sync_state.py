@@ -61,6 +61,41 @@ def test_save_and_load_sync_state_round_trip(tmp_path: Path) -> None:
     assert loaded == state
 
 
+def test_load_sync_state_creates_profiled_file_when_requested(tmp_path: Path) -> None:
+    state_path = tmp_path / "data" / "sync_state.json"
+
+    state = load_sync_state(state_path, expected_profile="tomoya")
+
+    assert state == SyncState.empty(profile="tomoya")
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {
+        "version": 3,
+        "profile": "tomoya",
+        "events": {},
+        "tombstones": {},
+    }
+
+
+def test_load_sync_state_rejects_profile_mismatch(tmp_path: Path) -> None:
+    state_path = tmp_path / "sync_state.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "profile": "alice",
+                "events": {},
+                "tombstones": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"sync state profile mismatch",
+    ):
+        load_sync_state(state_path, expected_profile="bob")
+
+
 def test_save_sync_state_rejects_event_id_present_in_events_and_tombstones(tmp_path: Path) -> None:
     state_path = tmp_path / "sync_state.json"
     state = SyncState(

@@ -14,7 +14,7 @@ from src.caldav_client import (
     CalDAVConnectionSettings,
     save_caldav_sync_report,
 )
-from src.config import ConfigError, load_config
+from src.config import AppConfig, ConfigError, DEFAULT_PROFILE_NAME, load_config
 from src.ics_writer import DEFAULT_ICS_PATH, write_calendar
 from src.garoon_client import (
     GaroonAuthenticationError,
@@ -22,10 +22,29 @@ from src.garoon_client import (
     GaroonClientError,
     PasswordAuthStrategy,
 )
-from src.logger import classify_exception_error_kind, configure_logging, log_structured_error
+from src.logger import (
+    classify_exception_error_kind,
+    configure_logging,
+    log_structured_error,
+    log_structured_info,
+    log_structured_warning,
+)
 from src.models import DateRange, EventSnapshot
+from src.run_summary import (
+    RunCounts,
+    RunFetchWindow,
+    RunSummary,
+    RunWarning,
+    build_delete_warning,
+    build_summary_history_path,
+    build_window_warning,
+    determine_run_mode,
+    save_run_summary,
+    save_run_summary_history,
+)
 from src.sync_plan import (
     DEFAULT_SYNC_PLAN_PATH,
+    SyncPlanActionSummary,
     build_sequence_by_event_id,
     build_sync_plan,
     build_uid_by_event_id,
@@ -35,6 +54,7 @@ from src.sync_plan import (
 from src.sync_state import (
     DEFAULT_SYNC_STATE_PATH,
     SyncStateJsonDecodeError,
+    SyncState,
     SyncStateValidationError,
     build_next_sync_state_from_delivery,
     diff_events,
@@ -66,19 +86,51 @@ class DryRunAnomalousChangeWarning:
 
 
 def main() -> int:
+    started_at = datetime.now().astimezone()
+    finished_at = started_at
+    config: AppConfig | None = None
+    logger: logging.Logger | None = None
+    date_range: DateRange | None = None
+    mode = "normal"
+    action_summary: SyncPlanActionSummary | None = None
+    warnings: list[RunWarning] = []
+    exit_code = 1
+    error_message: str | None = None
+    sync_state_saved = False
+    caldav_report = None
+
     try:
         config = load_config()
-        configure_logging(config.log_level)
+        configure_app_logging(config)
         logger = logging.getLogger(__name__)
+        sync_state_path = config.sync_state_path or DEFAULT_SYNC_STATE_PATH
+        sync_plan_path = config.sync_plan_path or DEFAULT_SYNC_PLAN_PATH
+        caldav_sync_result_path = config.caldav_sync_result_path or DEFAULT_CALDAV_SYNC_RESULT_PATH
+        ics_path = config.ics_path or DEFAULT_ICS_PATH
+        diagnostics_dir = config.diagnostics_dir
+        reports_dir = config.reports_dir
         date_range = build_date_range(
             config.garoon_start_days_offset,
             config.garoon_end_days_offset,
         )
-        logger.info(
-            "Fetching Garoon events from %s to %s.",
-            date_range.start.isoformat(timespec="seconds"),
-            date_range.end.isoformat(timespec="seconds"),
+        mode = determine_run_mode(
+            config.garoon_start_days_offset,
+            config.garoon_end_days_offset,
         )
+        log_run_start(
+            logger,
+            config=config,
+            date_range=date_range,
+            mode=mode,
+        )
+        window_warning = build_window_warning(
+            config.garoon_start_days_offset,
+            config.garoon_end_days_offset,
+        )
+        if window_warning is not None:
+            warnings.append(window_warning)
+            print_run_warning(window_warning)
+            log_run_warning(logger, warning=window_warning, mode=mode)
 
         client = GaroonClient(
             base_url=config.garoon_base_url,
@@ -99,33 +151,38 @@ def main() -> int:
             events=events,
         )
         try:
-            sync_state = load_sync_state(
-                DEFAULT_SYNC_STATE_PATH,
+            sync_state = load_profiled_sync_state(
+                sync_state_path,
                 create_if_missing=not config.caldav_dry_run,
+                profile_name=config.profile_name,
             )
         except SyncStateValidationError as exc:
             print_sync_state_validation_failure(
                 "load",
                 exc,
-                path=DEFAULT_SYNC_STATE_PATH,
+                path=sync_state_path,
             )
-            return 1
+            error_message = str(exc)
+            return exit_code
         except SyncStateJsonDecodeError as exc:
             print_sync_state_json_decode_failure(
                 "load",
                 exc,
-                path=DEFAULT_SYNC_STATE_PATH,
+                path=sync_state_path,
             )
-            return 1
+            error_message = str(exc)
+            return exit_code
         except (OSError, ValueError) as exc:
             log_sync_state_failure(
                 "load",
                 classify_exception_error_kind(exc),
                 exc,
-                path=DEFAULT_SYNC_STATE_PATH,
+                path=sync_state_path,
             )
-            print(f"Failed to load sync state from {DEFAULT_SYNC_STATE_PATH}: {exc}")
-            return 1
+            print(f"Failed to load sync state from {sync_state_path}: {exc}")
+            error_message = str(exc)
+            return exit_code
+        sync_state = ensure_profile_bound_sync_state(sync_state, profile_name=config.profile_name)
         synced_at = datetime.now().astimezone()
         diff = diff_events(
             events,
@@ -142,26 +199,33 @@ def main() -> int:
                 context="build_sync_plan",
             )
             print(f"Failed to build sync plan: {exc}")
-            return 1
+            error_message = str(exc)
+            return exit_code
 
         save_snapshot(config.output_json_path, snapshot.to_dict())
         write_calendar(
-            DEFAULT_ICS_PATH,
+            ics_path,
             events,
             sequence_by_event_id=build_sequence_by_event_id(sync_plan),
             uid_by_event_id=build_uid_by_event_id(sync_plan),
         )
         try:
-            save_sync_plan(DEFAULT_SYNC_PLAN_PATH, sync_plan)
+            save_sync_plan(sync_plan_path, sync_plan)
         except (OSError, ValueError) as exc:
             log_sync_plan_failure(
                 "save",
                 classify_exception_error_kind(exc),
-                path=DEFAULT_SYNC_PLAN_PATH,
+                path=sync_plan_path,
             )
-            print(f"Failed to save sync plan to {DEFAULT_SYNC_PLAN_PATH}: {exc}")
-            return 1
+            print(f"Failed to save sync plan to {sync_plan_path}: {exc}")
+            error_message = str(exc)
+            return exit_code
         action_summary = summarize_sync_plan_actions(sync_plan)
+        delete_warning = build_delete_warning(action_summary.delete_count)
+        if delete_warning is not None:
+            warnings.append(delete_warning)
+            print_run_warning(delete_warning)
+            log_run_warning(logger, warning=delete_warning, mode=mode)
         dry_run_warning = maybe_build_dry_run_anomalous_change_warning(
             sync_plan,
             dry_run=config.caldav_dry_run,
@@ -171,6 +235,12 @@ def main() -> int:
         if dry_run_warning is not None:
             print_dry_run_anomalous_change_warning(dry_run_warning)
             log_dry_run_anomalous_change_warning(dry_run_warning)
+            warnings.append(
+                RunWarning(
+                    code="DRY_RUN_ANOMALOUS_CHANGE",
+                    message=build_dry_run_anomalous_change_warning_message(dry_run_warning),
+                )
+            )
         caldav_report = CalDAVClient(
             CalDAVConnectionSettings(
                 url=config.caldav_url,
@@ -181,6 +251,8 @@ def main() -> int:
                 diagnostic_dump_failed_ics=config.caldav_diagnostic_dump_failed_ics,
                 diagnostic_dump_success_ics=config.caldav_diagnostic_dump_success_ics,
                 diagnostic_dump_uid_lookup_json=config.caldav_diagnostic_dump_uid_lookup_json,
+                diagnostic_dir=diagnostics_dir,
+                report_dir=reports_dir,
             ),
             logger=logger,
         ).sync(
@@ -190,9 +262,8 @@ def main() -> int:
             previous_sync_state=sync_state.events,
         )
         log_caldav_delivery_failures(caldav_report.results)
-        save_caldav_sync_report(DEFAULT_CALDAV_SYNC_RESULT_PATH, caldav_report)
+        save_caldav_sync_report(caldav_sync_result_path, caldav_report)
 
-        sync_state_saved = False
         if not config.caldav_dry_run:
             try:
                 next_sync_state = build_next_sync_state_from_delivery(
@@ -208,7 +279,8 @@ def main() -> int:
                     exc,
                     context="build_next_sync_state_from_delivery",
                 )
-                return 1
+                error_message = str(exc)
+                return exit_code
             except (OSError, ValueError) as exc:
                 log_sync_state_failure(
                     "build",
@@ -217,31 +289,34 @@ def main() -> int:
                     context="build_next_sync_state_from_delivery",
                 )
                 print(f"Failed to build next sync state from delivery results: {exc}")
-                return 1
+                error_message = str(exc)
+                return exit_code
             if next_sync_state != sync_state:
                 try:
-                    save_sync_state(DEFAULT_SYNC_STATE_PATH, next_sync_state)
+                    save_sync_state(sync_state_path, next_sync_state)
                 except SyncStateValidationError as exc:
                     print_sync_state_validation_failure(
                         "save",
                         exc,
-                        path=DEFAULT_SYNC_STATE_PATH,
+                        path=sync_state_path,
                     )
-                    return 1
+                    error_message = str(exc)
+                    return exit_code
                 except (OSError, ValueError) as exc:
                     log_sync_state_failure(
                         "save",
                         classify_exception_error_kind(exc),
                         exc,
-                        path=DEFAULT_SYNC_STATE_PATH,
+                        path=sync_state_path,
                     )
-                    print(f"Failed to save sync state to {DEFAULT_SYNC_STATE_PATH}: {exc}")
-                    return 1
+                    print(f"Failed to save sync state to {sync_state_path}: {exc}")
+                    error_message = str(exc)
+                    return exit_code
                 sync_state_saved = True
 
         print(f"Fetched {len(events)} events")
         print(f"Saved JSON to {config.output_json_path}")
-        print(f"Saved ICS to {DEFAULT_ICS_PATH}")
+        print(f"Saved ICS to {ics_path}")
         print(
             "Sync plan summary: "
             f"{action_summary.create_count} create, "
@@ -256,33 +331,250 @@ def main() -> int:
             f"{caldav_report.failure_count} failed, "
             f"dry_run={caldav_report.dry_run}"
         )
-        print(f"Saved sync plan to {DEFAULT_SYNC_PLAN_PATH}")
-        print(f"Saved CalDAV sync result to {DEFAULT_CALDAV_SYNC_RESULT_PATH}")
+        print(f"Saved sync plan to {sync_plan_path}")
+        print(f"Saved CalDAV sync result to {caldav_sync_result_path}")
         if config.caldav_dry_run:
-            print(f"Skipped sync state update because dry_run=true: {DEFAULT_SYNC_STATE_PATH}")
+            print(f"Skipped sync state update because dry_run=true: {sync_state_path}")
         elif sync_state_saved:
-            print(f"Saved sync state to {DEFAULT_SYNC_STATE_PATH}")
+            print(f"Saved sync state to {sync_state_path}")
         else:
             print(
                 "Sync state unchanged because no create/update/delete actions succeeded: "
-                f"{DEFAULT_SYNC_STATE_PATH}"
+                f"{sync_state_path}"
             )
-        return 0 if caldav_report.failure_count == 0 else 1
+        exit_code = 0 if caldav_report.failure_count == 0 else 1
+        if exit_code != 0:
+            error_message = f"CalDAV delivery failures detected: {caldav_report.failure_count}"
+        return exit_code
     except ConfigError as exc:
-        print(f"Configuration error: {exc}")
-        return 1
+        error_message = f"Configuration error: {exc}"
+        print(error_message)
     except GaroonAuthenticationError as exc:
-        print(f"Authentication error: {exc}")
-        return 1
+        error_message = f"Authentication error: {exc}"
+        print(error_message)
     except GaroonClientError as exc:
-        print(f"Garoon API error: {exc}")
-        return 1
+        error_message = f"Garoon API error: {exc}"
+        print(error_message)
     except OSError as exc:
-        print(f"File output error: {exc}")
-        return 1
+        error_message = f"File output error: {exc}"
+        print(error_message)
     except ValueError as exc:
-        print(f"Sync state error: {exc}")
-        return 1
+        error_message = f"Sync state error: {exc}"
+        print(error_message)
+    finally:
+        finished_at = datetime.now().astimezone()
+        if config is not None and date_range is not None:
+            save_run_artifacts(
+                config=config,
+                started_at=started_at,
+                finished_at=finished_at,
+                date_range=date_range,
+                mode=mode,
+                action_summary=action_summary,
+                warnings=warnings,
+                error_message=error_message,
+                result="success" if exit_code == 0 else "failed",
+            )
+            if logger is not None:
+                log_run_finished(
+                    logger,
+                    config=config,
+                    date_range=date_range,
+                    mode=mode,
+                    action_summary=action_summary,
+                    warnings=warnings,
+                    error_message=error_message,
+                    result="success" if exit_code == 0 else "failed",
+                )
+    return exit_code
+
+
+def ensure_profile_bound_sync_state(sync_state: SyncState, *, profile_name: str) -> SyncState:
+    if sync_state.profile == profile_name:
+        return sync_state
+    return SyncState(
+        version=sync_state.version,
+        profile=profile_name,
+        events=dict(sync_state.events),
+        tombstones=dict(sync_state.tombstones),
+    )
+
+
+def configure_app_logging(config: AppConfig) -> None:
+    try:
+        configure_logging(
+            config.log_level,
+            profile_name=config.profile_name,
+            log_file_path=config.log_file_path,
+        )
+    except TypeError:
+        configure_logging(config.log_level)
+
+
+def load_profiled_sync_state(
+    sync_state_path: Path,
+    *,
+    create_if_missing: bool,
+    profile_name: str,
+) -> SyncState:
+    try:
+        return load_sync_state(
+            sync_state_path,
+            create_if_missing=create_if_missing,
+            expected_profile=profile_name,
+        )
+    except TypeError:
+        return load_sync_state(
+            sync_state_path,
+            create_if_missing=create_if_missing,
+        )
+
+
+def save_run_artifacts(
+    *,
+    config: AppConfig,
+    started_at: datetime,
+    finished_at: datetime,
+    date_range: DateRange,
+    mode: str,
+    action_summary: SyncPlanActionSummary | None,
+    warnings: list[RunWarning],
+    error_message: str | None,
+    result: str,
+) -> None:
+    run_summary_path = config.run_summary_path
+    diagnostics_dir = config.diagnostics_dir
+    if run_summary_path is None or diagnostics_dir is None:
+        return
+
+    summary = RunSummary(
+        profile=config.profile_name,
+        started_at=started_at.isoformat(timespec="seconds"),
+        finished_at=finished_at.isoformat(timespec="seconds"),
+        mode=mode,
+        dry_run=config.caldav_dry_run,
+        fetch_window=build_run_fetch_window(config=config, date_range=date_range),
+        result=result,
+        counts=build_run_counts(action_summary),
+        warnings=list(warnings),
+        error=error_message,
+    )
+    save_run_summary(run_summary_path, summary)
+    history_path = build_summary_history_path(
+        diagnostics_dir / "run_summaries",
+        recorded_at=finished_at,
+    )
+    save_run_summary_history(history_path, summary)
+    print(f"Saved run summary to {run_summary_path}")
+    print(f"Saved run summary history to {history_path}")
+
+
+def build_run_fetch_window(*, config: AppConfig, date_range: DateRange):
+    return RunFetchWindow(
+        start_days_offset=config.garoon_start_days_offset,
+        end_days_offset=config.garoon_end_days_offset,
+        start=date_range.start.isoformat(timespec="seconds"),
+        end=date_range.end.isoformat(timespec="seconds"),
+    )
+
+
+def build_run_counts(action_summary: SyncPlanActionSummary | None) -> RunCounts:
+    if action_summary is None:
+        return RunCounts()
+    return RunCounts(
+        create=action_summary.create_count,
+        update=action_summary.update_count,
+        delete=action_summary.delete_count,
+        skip=action_summary.skip_count,
+    )
+
+
+def log_run_start(
+    logger: logging.Logger,
+    *,
+    config: AppConfig,
+    date_range: DateRange,
+    mode: str,
+) -> None:
+    log_structured_info(
+        logger,
+        "sync run started",
+        fields={
+            "component": "runner",
+            "phase": "start",
+            "profile": config.profile_name,
+            "dry_run": config.caldav_dry_run,
+            "mode": mode,
+            "start_days_offset": config.garoon_start_days_offset,
+            "end_days_offset": config.garoon_end_days_offset,
+            "fetch_window_start": date_range.start.isoformat(timespec="seconds"),
+            "fetch_window_end": date_range.end.isoformat(timespec="seconds"),
+        },
+    )
+
+
+def log_run_finished(
+    logger: logging.Logger,
+    *,
+    config: AppConfig,
+    date_range: DateRange,
+    mode: str,
+    action_summary: SyncPlanActionSummary | None,
+    warnings: list[RunWarning],
+    error_message: str | None,
+    result: str,
+) -> None:
+    counts = build_run_counts(action_summary)
+    log_structured_info(
+        logger,
+        "sync run finished",
+        fields={
+            "component": "runner",
+            "phase": "finish",
+            "profile": config.profile_name,
+            "dry_run": config.caldav_dry_run,
+            "mode": mode,
+            "start_days_offset": config.garoon_start_days_offset,
+            "end_days_offset": config.garoon_end_days_offset,
+            "fetch_window_start": date_range.start.isoformat(timespec="seconds"),
+            "fetch_window_end": date_range.end.isoformat(timespec="seconds"),
+            "result": result,
+            "create_count": counts.create,
+            "update_count": counts.update,
+            "delete_count": counts.delete,
+            "skip_count": counts.skip,
+            "warning_count": len(warnings),
+            "error": error_message,
+        },
+    )
+
+
+def log_run_warning(logger: logging.Logger, *, warning: RunWarning, mode: str) -> None:
+    log_structured_warning(
+        logger,
+        "sync run warning",
+        fields={
+            "component": "runner",
+            "phase": "warning",
+            "mode": mode,
+            "warning_code": warning.code,
+            "warning": warning.message,
+        },
+    )
+
+
+def print_run_warning(warning: RunWarning) -> None:
+    print(f"WARNING[{warning.code}]: {warning.message}")
+
+
+def build_dry_run_anomalous_change_warning_message(
+    warning: DryRunAnomalousChangeWarning,
+) -> str:
+    return (
+        "Dry run detected unusually large pending changes. "
+        f"create={warning.create_count} delete={warning.delete_count} total={warning.total_count}. "
+        "Review sync_plan.json and sync_state.json before proceeding."
+    )
 
 
 def build_date_range(start_days_offset: int, end_days_offset: int) -> DateRange:
@@ -331,7 +623,7 @@ def print_dry_run_anomalous_change_warning(warning: DryRunAnomalousChangeWarning
         f"- total actions: {warning.total_count}\n"
         "- inspect examples: python -m src.sync_plan_inspect --action create | "
         "python -m src.sync_plan_inspect --action delete\n"
-        "Review data/sync_state.json and data/sync_plan.json, then verify representative "
+        "Review sync_state.json and sync_plan.json for the active profile, then verify representative "
         "events on a test calendar before proceeding to production."
     )
 

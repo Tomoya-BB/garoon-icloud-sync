@@ -14,6 +14,7 @@ from src.caldav_result_helpers import (
     matches_delivery_filter,
     summarize_create_conflicts,
 )
+from src.config import ConfigError, load_config
 from src.sync_plan import DEFAULT_SYNC_PLAN_PATH, SyncActionType, SyncPlan, load_sync_plan
 
 DEFAULT_ACTION_FILTERS = (
@@ -44,8 +45,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--plan-path",
-        default=str(DEFAULT_SYNC_PLAN_PATH),
-        help="Path to sync_plan.json. Defaults to data/sync_plan.json.",
+        default=None,
+        help="Path to sync_plan.json. Defaults to the active profile data directory when --env-path is set.",
+    )
+    parser.add_argument(
+        "--env-path",
+        default=None,
+        help="Optional .env path used to resolve profile-specific default paths.",
     )
     parser.add_argument(
         "--action",
@@ -104,7 +110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        plan_path = Path(args.plan_path).expanduser().resolve()
+        config = load_config(args.env_path) if args.env_path is not None else None
+        plan_path = _resolve_plan_path(args.plan_path, config=config)
         sync_plan = load_sync_plan(plan_path)
         requested_actions = _resolve_requested_actions(args.action)
         result_path = (
@@ -124,6 +131,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(f"inspection input file was not found: {exc.filename}", file=sys.stderr)
         return 1
+    except ConfigError as exc:
+        print(f"Failed to resolve inspection paths from config: {exc}", file=sys.stderr)
+        return 1
     except (OSError, ValueError) as exc:
         print(f"Failed to inspect sync plan: {exc}", file=sys.stderr)
         return 1
@@ -141,6 +151,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         result_index=result_index,
     )
     return 0
+
+
+def _resolve_plan_path(plan_path: str | None, *, config) -> Path:
+    if plan_path is not None:
+        return Path(plan_path).expanduser().resolve()
+    if config is not None and config.sync_plan_path is not None:
+        return config.sync_plan_path
+    return DEFAULT_SYNC_PLAN_PATH
 
 
 def _resolve_requested_actions(raw_actions: list[str] | None) -> list[SyncActionType]:

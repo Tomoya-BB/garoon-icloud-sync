@@ -174,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--state-path",
-        help="Path to the sync state file. Defaults to data/sync_state.json.",
+        help="Path to the sync state file. Defaults to the active profile state path when --env-path is set.",
     )
     common.add_argument(
         "--backups-dir",
@@ -293,6 +293,8 @@ def resolve_sync_state_path(
         return Path(state_path_arg).expanduser().resolve()
     if env_path:
         config = load_config(env_path)
+        if config.sync_state_path is not None:
+            return config.sync_state_path
         return (config.output_json_path.parent / DEFAULT_SYNC_STATE_PATH.name).resolve()
     return DEFAULT_SYNC_STATE_PATH
 

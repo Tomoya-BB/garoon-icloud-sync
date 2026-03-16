@@ -123,12 +123,13 @@ class TombstoneSyncState:
 @dataclass(frozen=True, slots=True)
 class SyncState:
     version: int = STATE_VERSION
+    profile: str | None = None
     events: dict[str, EventSyncState] = field(default_factory=dict)
     tombstones: dict[str, TombstoneSyncState] = field(default_factory=dict)
 
     @classmethod
-    def empty(cls) -> "SyncState":
-        return cls(version=STATE_VERSION, events={})
+    def empty(cls, *, profile: str | None = None) -> "SyncState":
+        return cls(version=STATE_VERSION, profile=profile, events={})
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "SyncState":
@@ -150,10 +151,11 @@ class SyncState:
             if isinstance(event_id, str) and isinstance(event_payload, dict)
         }
         version = _coerce_int(payload.get("version"), default=STATE_VERSION)
-        return cls(version=version, events=events, tombstones=tombstones)
+        profile = _optional_str(payload.get("profile"))
+        return cls(version=version, profile=profile, events=events, tombstones=tombstones)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "version": self.version,
             "events": {
                 event_id: event_state.to_dict()
@@ -164,6 +166,9 @@ class SyncState:
                 for event_id, tombstone in sorted(self.tombstones.items())
             },
         }
+        if self.profile is not None:
+            payload["profile"] = self.profile
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +219,11 @@ def validate_sync_state(
         errors.append(
             f"unsupported sync state version {payload['version']}; expected {STATE_VERSION}"
         )
+
+    if "profile" in payload:
+        raw_profile = payload["profile"]
+        if raw_profile is not None and not isinstance(raw_profile, str):
+            errors.append("top-level field 'profile' must be a string when present")
 
     if "events" not in payload:
         errors.append("missing required top-level field 'events'")
@@ -279,9 +289,10 @@ def load_sync_state(
     path: Path = DEFAULT_SYNC_STATE_PATH,
     *,
     create_if_missing: bool = True,
+    expected_profile: str | None = None,
 ) -> SyncState:
     if not path.exists():
-        state = SyncState.empty()
+        state = SyncState.empty(profile=expected_profile)
         if create_if_missing:
             save_sync_state(path, state)
         return state
@@ -291,7 +302,13 @@ def load_sync_state(
     except json.JSONDecodeError as exc:
         raise SyncStateJsonDecodeError(path, exc) from exc
     validate_sync_state(payload, path=path, operation="load")
-    return SyncState.from_dict(payload)
+    state = SyncState.from_dict(payload)
+    _validate_sync_state_profile_match(
+        state,
+        expected_profile=expected_profile,
+        path=path,
+    )
+    return state
 
 
 def save_sync_state(path: Path, state: SyncState) -> None:
@@ -492,6 +509,7 @@ def build_next_sync_state(
         }
     )
     return _build_validated_sync_state(
+        profile=previous_state.profile,
         events=event_states,
         tombstones=tombstones,
         source="build_next_sync_state",
@@ -594,6 +612,7 @@ def build_next_sync_state_from_delivery(
         return previous_state
 
     return _build_validated_sync_state(
+        profile=previous_state.profile,
         events=event_states,
         tombstones=tombstones,
         source="build_next_sync_state_from_delivery",
@@ -977,14 +996,33 @@ def _serialize_validated_sync_state(
     return payload
 
 
+def _validate_sync_state_profile_match(
+    state: SyncState,
+    *,
+    expected_profile: str | None,
+    path: Path,
+) -> None:
+    if expected_profile is None or state.profile is None or state.profile == expected_profile:
+        return
+    raise SyncStateValidationError(
+        "sync state profile mismatch.\n"
+        f"- state_path: {path}\n"
+        f"- state_profile: {state.profile}\n"
+        f"- requested_profile: {expected_profile}\n"
+        "- Refusing to continue because this state file belongs to a different profile."
+    )
+
+
 def _build_validated_sync_state(
     *,
+    profile: str | None,
     events: dict[str, EventSyncState],
     tombstones: dict[str, TombstoneSyncState],
     source: str,
 ) -> SyncState:
     next_state = SyncState(
         version=STATE_VERSION,
+        profile=profile,
         events=events,
         tombstones=tombstones,
     )
