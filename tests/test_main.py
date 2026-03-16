@@ -196,6 +196,101 @@ def test_main_writes_run_summary_and_history(monkeypatch, tmp_path: Path) -> Non
     assert len(history_files) == 1
 
 
+def test_main_fails_fast_on_sync_state_profile_mismatch_before_planning_or_delivery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runtime_dir = tmp_path / "runtime" / "profiles" / "tomoya"
+    data_dir = runtime_dir / "data"
+    config = AppConfig(
+        garoon_base_url="https://garoon.example.com/g",
+        garoon_username="user",
+        garoon_password="pass",
+        garoon_start_days_offset=0,
+        garoon_end_days_offset=92,
+        output_json_path=data_dir / "events.json",
+        log_level="INFO",
+        caldav_url="https://caldav.example.com/principals/tomo",
+        caldav_username="caldav-user",
+        caldav_password="caldav-pass",
+        caldav_calendar_name="PoC Calendar",
+        caldav_dry_run=False,
+        profile_name="tomoya",
+        app_data_dir=runtime_dir,
+        sync_state_path=data_dir / "sync_state.json",
+        sync_plan_path=data_dir / "sync_plan.json",
+        caldav_sync_result_path=data_dir / "caldav_sync_result.json",
+        ics_path=data_dir / "calendar.ics",
+        diagnostics_dir=data_dir / "diagnostics",
+        reports_dir=data_dir / "reports",
+        logs_dir=runtime_dir / "logs",
+        log_file_path=runtime_dir / "logs" / "garoon-icloud-sync.log",
+        run_summary_path=data_dir / "run_summary.json",
+    )
+    caldav_sync_called = False
+    monkeypatch.setattr(main_module, "load_config", lambda: config)
+    monkeypatch.setattr(main_module, "configure_logging", lambda *args, **kwargs: None)
+
+    class FakeGaroonClient:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def fetch_events(self, **kwargs) -> list[EventRecord]:
+            return [_build_event("evt-1")]
+
+    class FakeCalDAVClient:
+        def __init__(self, settings, *, logger=None) -> None:
+            pass
+
+        def sync(self, *args, **kwargs) -> CalDAVSyncReport:
+            nonlocal caldav_sync_called
+            caldav_sync_called = True
+            raise AssertionError("CalDAV sync must not run after profile mismatch")
+
+    monkeypatch.setattr(main_module, "GaroonClient", FakeGaroonClient)
+    monkeypatch.setattr(main_module, "CalDAVClient", FakeCalDAVClient)
+    monkeypatch.setattr(
+        main_module,
+        "load_sync_state",
+        lambda path, create_if_missing=True, expected_profile=None: (_ for _ in ()).throw(
+            SyncStateValidationError(
+                "sync state profile mismatch.\n"
+                f"- state_path: {data_dir / 'sync_state.json'}\n"
+                "- state_profile: alice\n"
+                "- requested_profile: tomoya\n"
+                "- Refusing to continue because this state file belongs to a different profile."
+            )
+        ),
+    )
+    monkeypatch.setattr(main_module, "save_snapshot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(main_module, "write_calendar", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        main_module,
+        "save_sync_plan",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sync plan must not be saved")),
+    )
+    monkeypatch.setattr(main_module, "save_caldav_sync_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        main_module,
+        "save_sync_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sync state must not be saved")),
+    )
+
+    exit_code = main_module.main()
+
+    assert exit_code == 1
+    assert caldav_sync_called is False
+    payload = json.loads((data_dir / "run_summary.json").read_text(encoding="utf-8"))
+    assert payload["result"] == "failed"
+    assert payload["counts"] == {
+        "create": 0,
+        "update": 0,
+        "delete": 0,
+        "skip": 0,
+    }
+    assert "sync state profile mismatch" in payload["error"]
+
+
 def test_main_dry_run_does_not_plan_delete_for_events_outside_current_fetch_window(
     monkeypatch,
     tmp_path: Path,

@@ -53,9 +53,9 @@ class AppConfig:
 
 def load_config(env_path: str | Path = ".env") -> AppConfig:
     resolved_env_path = Path(env_path).expanduser().resolve()
-    env_dir = resolved_env_path.parent
     file_values = dotenv_values(resolved_env_path)
     values = {**file_values, **os.environ}
+    working_dir = Path.cwd().resolve()
 
     required_keys = (
         "GAROON_BASE_URL",
@@ -89,11 +89,11 @@ def load_config(env_path: str | Path = ".env") -> AppConfig:
         )
 
     profile_name = _normalize_profile_name(values.get("PROFILE_NAME"))
-    app_data_dir = _resolve_optional_path(values.get("APP_DATA_DIR"), env_dir=env_dir)
+    app_data_dir = _resolve_optional_path(values.get("APP_DATA_DIR"), working_dir=working_dir)
     output_json_path = _resolve_output_json_path(
         values.get("OUTPUT_JSON_PATH"),
-        env_dir=env_dir,
         app_data_dir=app_data_dir,
+        working_dir=working_dir,
     )
     data_dir = output_json_path.parent
     runtime_dir = app_data_dir or _infer_runtime_dir(data_dir)
@@ -215,28 +215,28 @@ def _empty_to_none(value: object) -> str | None:
 def _resolve_output_json_path(
     raw_value: object,
     *,
-    env_dir: Path,
     app_data_dir: Path | None,
+    working_dir: Path,
 ) -> Path:
     if raw_value is not None and str(raw_value).strip():
-        return _resolve_path(str(raw_value), env_dir=env_dir)
-    base_dir = app_data_dir or env_dir
+        return _resolve_path(str(raw_value), working_dir=working_dir)
+    base_dir = app_data_dir or working_dir
     return (base_dir / "data" / "events.json").resolve()
 
 
-def _resolve_optional_path(raw_value: object, *, env_dir: Path) -> Path | None:
+def _resolve_optional_path(raw_value: object, *, working_dir: Path) -> Path | None:
     if raw_value is None:
         return None
     normalized = str(raw_value).strip()
     if not normalized:
         return None
-    return _resolve_path(normalized, env_dir=env_dir)
+    return _resolve_path(normalized, working_dir=working_dir)
 
 
-def _resolve_path(raw_value: str, *, env_dir: Path) -> Path:
+def _resolve_path(raw_value: str, *, working_dir: Path) -> Path:
     path = Path(raw_value).expanduser()
     if not path.is_absolute():
-        path = env_dir / path
+        path = working_dir / path
     return path.resolve()
 
 

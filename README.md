@@ -38,7 +38,8 @@ runtime/
 ## 後方互換
 
 - `PROFILE_NAME` 未指定時は `default` を使います
-- `APP_DATA_DIR` 未指定時は、`.env` の場所を基準に `data/` を使います
+- `APP_DATA_DIR` などの相対パスは、実行時の working directory を基準に解決されます
+- `APP_DATA_DIR` 未指定時は、従来どおり `./data` を使います
 - リポジトリ直下の `.env` をそのまま使う既存運用では、従来どおり `./data` が既定です
 - 既存の `sync_state.json` に `profile` が無くても読めます
 - ただし、`profile` が入った state を別 profile で実行すると fail-fast します
@@ -264,6 +265,7 @@ CALDAV_DRY_RUN=false
 - `./logs` for legacy single-user file logs
 
 profile 別 `.env` は `SYNC_ENV_FILE` で切り替えます。
+相対パス設定は `/app`、つまりリポジトリルート基準で解決されます。
 
 通常運用:
 

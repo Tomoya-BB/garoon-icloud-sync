@@ -8,6 +8,7 @@ from src.config import DEFAULT_PROFILE_NAME, ConfigError, load_config
 
 
 def test_load_config_resolves_relative_output_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text(
         "\n".join(
@@ -60,6 +61,7 @@ def test_load_config_reads_dry_run_warning_thresholds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text(
         "\n".join(
@@ -95,6 +97,7 @@ def test_load_config_rejects_non_positive_dry_run_warning_threshold(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text(
         "\n".join(
@@ -127,6 +130,7 @@ def test_load_config_reads_caldav_diagnostic_flags(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text(
         "\n".join(
@@ -165,6 +169,7 @@ def test_load_config_builds_profile_runtime_paths_when_output_path_is_omitted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text(
         "\n".join(
@@ -212,6 +217,7 @@ def test_load_config_defaults_profile_name_when_unspecified(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
     env_path = tmp_path / ".env"
     env_path.write_text(
         "\n".join(
@@ -238,3 +244,40 @@ def test_load_config_defaults_profile_name_when_unspecified(
 
     assert config.profile_name == DEFAULT_PROFILE_NAME
     assert config.output_json_path == (tmp_path / "data" / "events.json").resolve()
+
+
+def test_load_config_resolves_profile_runtime_relative_to_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    env_path = tmp_path / "runtime" / "profiles" / "tomoya" / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(
+        "\n".join(
+            [
+                "PROFILE_NAME=tomoya",
+                "APP_DATA_DIR=runtime/profiles/tomoya",
+                "GAROON_BASE_URL=https://example.cybozu.com/g",
+                "GAROON_USERNAME=test-user",
+                "GAROON_PASSWORD=test-pass",
+                "GAROON_START_DAYS_OFFSET=0",
+                "GAROON_END_DAYS_OFFSET=92",
+                "LOG_LEVEL=info",
+                "CALDAV_URL=https://caldav.example.com/",
+                "CALDAV_USERNAME=calendar-user",
+                "CALDAV_PASSWORD=calendar-pass",
+                "CALDAV_CALENDAR_NAME=PoC Calendar",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("APP_DATA_DIR", raising=False)
+    monkeypatch.delenv("PROFILE_NAME", raising=False)
+    monkeypatch.delenv("OUTPUT_JSON_PATH", raising=False)
+
+    config = load_config(env_path)
+
+    runtime_dir = (tmp_path / "runtime" / "profiles" / "tomoya").resolve()
+    assert config.app_data_dir == runtime_dir
+    assert config.sync_state_path == runtime_dir / "data" / "sync_state.json"

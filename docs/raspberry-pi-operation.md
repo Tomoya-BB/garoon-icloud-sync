@@ -7,6 +7,7 @@
 - Docker Engine と `docker compose` が使える
 - リポジトリが `/home/tomoya/projects/garoon-icloud-sync` にある
 - profile ごとの `.env` を `runtime/profiles/<profile>/.env` に置く
+- `.env` 内の相対パスは、このリポジトリルートを基準に書く
 - `.env` は Git 管理せず、`chmod 600` で権限を絞る
 - 通常運用値は `GAROON_START_DAYS_OFFSET=0`、`GAROON_END_DAYS_OFFSET=92`、`CALDAV_DRY_RUN=false`
 

@@ -218,6 +218,41 @@ def test_backup_command_fails_when_sync_state_file_is_missing(
     assert f"sync_state file was not found: {state_path}" in captured.err
 
 
+def test_resolve_sync_state_path_uses_profile_env_runtime_relative_to_working_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    env_path = tmp_path / "runtime" / "profiles" / "tomoya" / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text(
+        "\n".join(
+            [
+                "PROFILE_NAME=tomoya",
+                "APP_DATA_DIR=runtime/profiles/tomoya",
+                "GAROON_BASE_URL=https://example.cybozu.com/g",
+                "GAROON_USERNAME=test-user",
+                "GAROON_PASSWORD=test-pass",
+                "GAROON_START_DAYS_OFFSET=0",
+                "GAROON_END_DAYS_OFFSET=92",
+                "LOG_LEVEL=INFO",
+                "CALDAV_URL=https://caldav.example.com/",
+                "CALDAV_USERNAME=calendar-user",
+                "CALDAV_PASSWORD=calendar-pass",
+                "CALDAV_CALENDAR_NAME=PoC Calendar",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    state_path = sync_state_backup_module.resolve_sync_state_path(
+        state_path_arg=None,
+        env_path=str(env_path),
+    )
+
+    assert state_path == (tmp_path / "runtime" / "profiles" / "tomoya" / "data" / "sync_state.json").resolve()
+
+
 def _write_sync_state(path: Path, *, event_id: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
