@@ -1,6 +1,5 @@
 services:
   garoon-sync:
-    container_name: garoon-sync
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,7 +9,9 @@ services:
       TZ: Asia/Tokyo
       PYTHONUNBUFFERED: "1"
     volumes:
-      - ./.env:/app/.env:ro
+      - ${SYNC_ENV_FILE:-./.env}:/app/.env:ro
       - ./data:/app/data
+      - ./runtime:/app/runtime
+      - ./logs:/app/logs
     command: ["python", "-m", "src.main"]
     init: true

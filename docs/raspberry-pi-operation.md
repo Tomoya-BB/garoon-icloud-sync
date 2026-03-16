@@ -1,109 +1,64 @@
 # Raspberry Pi Operation
 
-このドキュメントは、`garoon-icloud-sync` を Raspberry Pi 上で常時運用するための手順です。README が導入の入口であるのに対して、ここでは `systemd --user` timer を使った定期実行、初回 backfill、通常運用時の確認ポイントをまとめます。
+このドキュメントは、Raspberry Pi 上で `garoon-icloud-sync` を複数 profile 運用するための実践向けメモです。前提パスは `/home/tomoya/projects/garoon-icloud-sync`、タイムゾーンは `Asia/Tokyo` です。
 
-前提パスは `/home/tomoya/projects/garoon-icloud-sync`、タイムゾーンは `Asia/Tokyo` です。
+## 前提
 
-## 前提条件
+- Docker Engine と `docker compose` が使える
+- リポジトリが `/home/tomoya/projects/garoon-icloud-sync` にある
+- profile ごとの `.env` を `runtime/profiles/<profile>/.env` に置く
+- `.env` は Git 管理せず、`chmod 600` で権限を絞る
+- 通常運用値は `GAROON_START_DAYS_OFFSET=0`、`GAROON_END_DAYS_OFFSET=92`、`CALDAV_DRY_RUN=false`
 
-- Raspberry Pi OS 64bit 系で Docker Engine と `docker compose` が使える
-- `tomoya` ユーザーが Docker を実行できる
-- リポジトリが `/home/tomoya/projects/garoon-icloud-sync` に配置されている
-- `.env` がリポジトリ直下にある
-- `data/` をホスト側に永続化している
-- 初回セットアップ時に一度は `docker compose build garoon-sync` を実行している
-- Raspberry Pi 本体のタイムゾーンが `Asia/Tokyo` になっている
+## 推奨 profile 構成
 
-タイムゾーン確認と設定:
-
-```bash
-timedatectl status
-sudo timedatectl set-timezone Asia/Tokyo
+```text
+/home/tomoya/projects/garoon-icloud-sync/
+  runtime/
+    profiles/
+      tomoya/
+        .env
+        .env.backfill
+        data/
+        logs/
 ```
 
-## 通常運用の推奨値
+通常運用と backfill は別ファイルで分けてください。
 
-通常運用では、`.env` を次の値にしておく前提です。
-
-```dotenv
-GAROON_START_DAYS_OFFSET=0
-GAROON_END_DAYS_OFFSET=92
-CALDAV_DRY_RUN=false
-```
-
-確認時だけ `dry-run` にしたい場合は、`.env` を変更せずコマンド側で `CALDAV_DRY_RUN=true` を一時上書きします。
+- 通常運用: `runtime/profiles/tomoya/.env`
+- backfill: `runtime/profiles/tomoya/.env.backfill`
 
 ## 手動実行
 
-本番実行:
+通常運用:
 
 ```bash
 cd /home/tomoya/projects/garoon-icloud-sync
-./scripts/run_docker_sync.sh
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env ./scripts/run_docker_sync.sh
 ```
 
-`dry-run` 実行:
+通常運用の dry-run:
 
 ```bash
 cd /home/tomoya/projects/garoon-icloud-sync
-docker compose run --rm -e CALDAV_DRY_RUN=true garoon-sync
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env CALDAV_DRY_RUN=true ./scripts/run_docker_sync.sh
 ```
 
-`docker compose` を直接使う本番実行:
+backfill dry-run:
 
 ```bash
 cd /home/tomoya/projects/garoon-icloud-sync
-docker compose run --rm garoon-sync
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env.backfill ./scripts/run_docker_sync.sh
 ```
 
-確認ポイント:
-
-- `data/sync_plan.json` の `create` / `update` / `delete` 件数が想定どおりか
-- `data/caldav_sync_result.json` に想定外の失敗が出ていないか
-- `data/sync_state.json` を意図せず消したり入れ替えたりしていないか
-
-## 初回 backfill
-
-初回だけは broad range で一度同期し、その後に通常運用の window へ戻す運用を想定しています。ここでは例として、過去 365 日から 183 日先までを同期します。
-
-### 1. `sync_state.json` をバックアップする
+backfill 本番:
 
 ```bash
 cd /home/tomoya/projects/garoon-icloud-sync
-docker compose run --rm garoon-sync python -m src.sync_state_backup backup
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env.backfill CALDAV_DRY_RUN=false ./scripts/run_docker_sync.sh
 ```
 
-### 2. 広範囲の `dry-run` を実行する
-
-```bash
-cd /home/tomoya/projects/garoon-icloud-sync
-docker compose run --rm \
-  -e CALDAV_DRY_RUN=true \
-  -e GAROON_START_DAYS_OFFSET=-365 \
-  -e GAROON_END_DAYS_OFFSET=183 \
-  garoon-sync
-```
-
-### 3. 差分を確認する
-
-- `data/sync_plan.json` の `create` / `delete` 件数
-- `data/caldav_sync_result.json` の失敗有無
-- テスト用カレンダーでの見え方
-
-### 4. 問題なければ広範囲の本番実行を行う
-
-```bash
-cd /home/tomoya/projects/garoon-icloud-sync
-docker compose run --rm \
-  -e CALDAV_DRY_RUN=false \
-  -e GAROON_START_DAYS_OFFSET=-365 \
-  -e GAROON_END_DAYS_OFFSET=183 \
-  garoon-sync
-```
-
-### 5. 通常運用の設定に戻す
-
-backfill 後は `.env` を通常運用の値へ戻します。
+backfill 後は、通常運用の `.env` を必ず次へ戻します。
 
 ```dotenv
 GAROON_START_DAYS_OFFSET=0
@@ -111,126 +66,78 @@ GAROON_END_DAYS_OFFSET=92
 CALDAV_DRY_RUN=false
 ```
 
-## 通常運用
+## 確認ポイント
 
-通常運用では、毎回 broad range を取りにいかず、日常同期の window だけを取得します。
+通常 run ごとに、少なくとも次を見れば状況を追えます。
 
-確認のために一時的に `dry-run` を行う場合:
+- `runtime/profiles/tomoya/data/sync_plan.json`
+- `runtime/profiles/tomoya/data/caldav_sync_result.json`
+- `runtime/profiles/tomoya/data/run_summary.json`
+- `runtime/profiles/tomoya/logs/garoon-icloud-sync.log`
+
+warning の見方:
+
+- `DELETE_DETECTED`: delete が 1 件以上ある
+- `BACKFILL_WINDOW`: 通常運用の 0..92 日を超える fetch window
+- `DRY_RUN_ANOMALOUS_CHANGE`: dry-run で大量差分
+
+## state の扱い
+
+- `sync_state.json` は profile ごとに分けます
+- state 内の `profile` と実行 profile が違う場合は fail-fast します
+- fail-fast 時は save も自動修復も行いません
+- `sync_state.json` を安易に削除せず、必要なら先にバックアップしてください
+
+バックアップ例:
 
 ```bash
 cd /home/tomoya/projects/garoon-icloud-sync
-docker compose run --rm \
-  -e CALDAV_DRY_RUN=true \
-  -e GAROON_START_DAYS_OFFSET=0 \
-  -e GAROON_END_DAYS_OFFSET=92 \
-  garoon-sync
+python -m src.sync_state_backup backup --env-path runtime/profiles/tomoya/.env
 ```
 
-通常運用時のポイント:
+一覧確認:
 
-- fetch window ベースの削除判定なので、通常運用の window 外にあるイベントを誤削除しにくい
-- broad range backfill で作った state を残したまま通常運用へ切り替えてよい
-- `delete` 件数が想定外に増えている場合は、そのまま本番へ進めず `dry-run` の結果を見直す
+```bash
+python -m src.sync_state_backup list --env-path runtime/profiles/tomoya/.env
+```
 
-## systemd --user service / timer の配置
+## systemd --user template
 
-`systemd --user` では、配布している unit をホームディレクトリ配下へ配置して使います。
+template unit を使うと、profile ごとに独立した timer を張れます。
 
 配置:
 
 ```bash
 mkdir -p /home/tomoya/.config/systemd/user
-install -D -m 0644 /home/tomoya/projects/garoon-icloud-sync/deploy/systemd/user/garoon-sync.service /home/tomoya/.config/systemd/user/garoon-sync.service
-install -D -m 0644 /home/tomoya/projects/garoon-icloud-sync/deploy/systemd/user/garoon-sync.timer /home/tomoya/.config/systemd/user/garoon-sync.timer
-```
-
-設定反映:
-
-```bash
+install -D -m 0644 /home/tomoya/projects/garoon-icloud-sync/deploy/systemd/user/garoon-icloud-sync@.service /home/tomoya/.config/systemd/user/garoon-icloud-sync@.service
+install -D -m 0644 /home/tomoya/projects/garoon-icloud-sync/deploy/systemd/user/garoon-icloud-sync@.timer /home/tomoya/.config/systemd/user/garoon-icloud-sync@.timer
 systemctl --user daemon-reload
-systemctl --user enable --now garoon-sync.timer
+systemctl --user enable --now garoon-icloud-sync@tomoya.timer
 ```
 
-timer 設定を変更したあとに反映し直す場合:
+この template は内部で `SYNC_ENV_FILE=runtime/profiles/%i/.env` を使います。
+
+確認コマンド:
 
 ```bash
-systemctl --user daemon-reload
-systemctl --user restart garoon-sync.timer
+systemctl --user status garoon-icloud-sync@tomoya.service
+systemctl --user status garoon-icloud-sync@tomoya.timer
+journalctl --user -u garoon-icloud-sync@tomoya.service -n 100 --no-pager
+journalctl --user -u garoon-icloud-sync@tomoya.service -f
 ```
 
-手動で service を実行して確認する場合:
+## linger
 
-```bash
-systemctl --user start garoon-sync.service
-```
-
-## systemd の確認コマンド
-
-timer 一覧:
-
-```bash
-systemctl --user list-timers
-```
-
-timer 状態:
-
-```bash
-systemctl --user status garoon-sync.timer
-```
-
-service 状態:
-
-```bash
-systemctl --user status garoon-sync.service
-```
-
-直近ログ:
-
-```bash
-journalctl --user -u garoon-sync.service -n 100 --no-pager
-```
-
-ログ追跡:
-
-```bash
-journalctl --user -u garoon-sync.service -f
-```
-
-## timer の運用方針
-
-Raspberry Pi では、15 分または 30 分間隔での運用が可能です。配布している `deploy/systemd/user/garoon-sync.timer` は 30 分設定なので、必要に応じて `OnUnitActiveSec` を 15 分へ調整してください。
-
-配布している timer の主な設定:
-
-- `OnBootSec=5min`
-- `OnUnitActiveSec=30min`
-- `Persistent=true`
-
-## ログアウト後も timer を動かす設定
-
-`systemd --user` の timer をログアウト後も動かすには、linger を有効化します。
+ログアウト後も timer を動かすなら linger を有効化します。
 
 ```bash
 sudo loginctl enable-linger tomoya
 ```
 
-root シェルなら次でも同じです。
+## 運用ルール
 
-```bash
-loginctl enable-linger tomoya
-```
-
-有効化後は、再ログイン前でも次のコマンドで状態確認できます。
-
-```bash
-systemctl --user list-timers
-journalctl --user -u garoon-sync.service -n 100 --no-pager
-```
-
-## 運用時の注意点
-
-- 初回本番同期の前には、必ず `CALDAV_DRY_RUN=true` で差分件数を確認する
-- 初回は本番カレンダーではなく、テスト用カレンダーで確認してから切り替える
-- `data/sync_state.json` は差分同期の基準状態なので、安易に削除しない
-- 別環境の `data/sync_state.json` をそのまま持ち込むと、現在の iCloud 側実態とずれて update / delete 判定に影響することがある
-- `delete` が想定外に多い場合は、通常運用へ戻る前に `sync_plan.json` と `caldav_sync_result.json` を見直す
+- 初回は必ずテスト用カレンダーで dry-run から始める
+- 通常運用値は `0 / 92 / false` を維持する
+- backfill 用設定を通常運用へ残さない
+- delete が想定外なら本番へ進めない
+- profile をまたいで state を持ち込まない

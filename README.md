@@ -1,78 +1,69 @@
 # garoon-icloud-sync
 
-## 概要
+Garoon の予定を取得し、iCloud を含む CalDAV カレンダーへ同期するツールです。現在は「1人運用でも壊さず、複数 profile でも state を混線させない」ことを重視した実行基盤になっています。
 
-`garoon-icloud-sync` は、Garoon の予定を取得し、iCloud CalDAV カレンダーへ同期するためのツールです。実行は Docker Compose を前提としており、Raspberry Pi 上では `systemd --user` timer を使って定期実行できます。
+## この版の安全方針
 
-このツールは、初回の広範囲同期と、その後の通常運用を分けて扱う前提で設計しています。
+- `sync_state.json` は profile 間で共有しません
+- `dry-run` と本番実行はログと run summary で明確に区別します
+- 通常運用と backfill を混同しにくいよう、広い fetch window には warning を残します
+- delete が 1 件以上ある run は warning を残します
+- state 内の profile と実行 profile が不一致なら fail-fast します
+- 既存の削除判定ロジックは安全側のまま維持します
 
-- 初回は `dry-run` で差分を確認してから本番反映する
-- 初回の backfill は広い取得範囲で一度だけ実施する
-- 通常運用は `GAROON_START_DAYS_OFFSET=0`、`GAROON_END_DAYS_OFFSET=92` を推奨する
-- 削除判定は fetch window ベースの安全側ロジックで行う
+## 推奨ディレクトリ構成
 
-README は導入と運用の入口に絞り、Raspberry Pi での詳細な常時運用手順は [docs/raspberry-pi-operation.md](docs/raspberry-pi-operation.md) にまとめています。
+新規運用では、profile ごとに `.env` と runtime を分ける構成を推奨します。
 
-## 主な機能
-
-- Garoon REST API から指定期間の予定を取得
-- 取得した予定を内部で正規化し、JSON と ICS を生成
-- iCloud を含む CalDAV サーバーに対して `create` / `update` / `delete` を判定して同期
-- `sync_state.json` を使った状態管理付きの差分同期
-- fetch window ベースの削除判定により、通常運用で範囲外イベントを誤削除しにくい
-- `CALDAV_DRY_RUN=true` による安全な事前確認
-- `sync_plan.json` と `caldav_sync_result.json` による差分・送信結果の可視化
-- Raspberry Pi + Docker Compose + `systemd --user` timer による継続運用
-- start-only timed event では iCloud 対応のため `DTEND` を補完
-
-## システム構成
-
-```mermaid
-flowchart LR
-    T["systemd --user timer<br/>Raspberry Pi での定期実行"] --> D["Docker Compose<br/>garoon-sync"]
-    G["Garoon REST API"] --> A["同期処理<br/>Python"]
-    D --> A
-    A --> J["data/events.json<br/>正規化済みイベント"]
-    A --> I["data/calendar.ics<br/>ICS"]
-    A --> P["data/sync_plan.json<br/>同期アクション"]
-    A --> R["data/caldav_sync_result.json<br/>送信結果"]
-    A <--> S["data/sync_state.json<br/>同期状態"]
-    A <--> C["iCloud CalDAV"]
+```text
+runtime/
+  profiles/
+    tomoya/
+      .env
+      data/
+        events.json
+        calendar.ics
+        sync_plan.json
+        caldav_sync_result.json
+        sync_state.json
+        run_summary.json
+        diagnostics/
+          run_summaries/
+      logs/
+        garoon-icloud-sync.log
 ```
 
-Garoon から取得した予定はコンテナ内の Python アプリで正規化され、JSON と ICS を生成したうえで CalDAV に同期されます。`sync_state.json` は差分判定の基準状態、`sync_plan.json` は今回の同期予定、`caldav_sync_result.json` は実行結果の記録です。Raspberry Pi 運用では、この処理を `systemd --user` timer から定期実行します。
+`run_summary.json` の最新は profile ごとの `data/run_summary.json` に保存されます。履歴は `data/diagnostics/run_summaries/` に timestamp 付きで残ります。
 
-## 同期の流れ
+## 後方互換
 
-1. Garoon から、`GAROON_START_DAYS_OFFSET` から `GAROON_END_DAYS_OFFSET` までの予定を取得します。
-2. 取得した予定を内部モデルへ正規化し、`data/events.json` と `data/calendar.ics` を生成します。
-3. `sync_state.json` と比較して、CalDAV に対する `create` / `update` / `delete` / `skip` を判定し、`data/sync_plan.json` を保存します。
-4. CalDAV に同期を実行し、結果を `data/caldav_sync_result.json` に保存します。
-5. `dry-run` でなければ、成功した結果をもとに `sync_state.json` を更新します。
-
-削除判定は「そのイベントを最後に確認した取得範囲が、今回の取得範囲に完全に含まれるか」で判断します。そのため、初回 backfill で広く取り込んだイベントは、通常運用の狭い window に切り替えたあとでも、範囲外という理由だけで削除されにくい設計です。
-
-また、start-only timed event は iCloud 互換性のため `DTEND` を補完して ICS を生成します。
+- `PROFILE_NAME` 未指定時は `default` を使います
+- `APP_DATA_DIR` 未指定時は、`.env` の場所を基準に `data/` を使います
+- リポジトリ直下の `.env` をそのまま使う既存運用では、従来どおり `./data` が既定です
+- 既存の `sync_state.json` に `profile` が無くても読めます
+- ただし、`profile` が入った state を別 profile で実行すると fail-fast します
 
 ## クイックスタート
 
-最初は本番カレンダーではなく、テスト用カレンダーで `dry-run` から始めてください。
-初回は `CALDAV_CALENDAR_NAME` に本番カレンダーを指定せず、必ずテスト用カレンダー名を設定してください。
-
-### 1. リポジトリを取得する
+### 1. リポジトリを取得
 
 ```bash
 git clone <YOUR_REPOSITORY_URL>
 cd garoon-icloud-sync
-cp .env.example .env
-mkdir -p data/diagnostics data/reports data/backups
+mkdir -p runtime/profiles/default
+cp .env.example runtime/profiles/default/.env
 ```
 
-### 2. `.env` を設定する
+### 2. `.env` を設定
 
-最低限、次の項目を設定します。
+`.env` は Git 管理しないでください。`chmod 600 runtime/profiles/default/.env` のように権限も絞るのが安全です。
+
+通常運用の最小例:
 
 ```dotenv
+PROFILE_NAME=default
+APP_DATA_DIR=runtime/profiles/default
+
 GAROON_BASE_URL=https://example.cybozu.com/g
 GAROON_USERNAME=your-username
 GAROON_PASSWORD=your-password
@@ -84,236 +75,248 @@ CALDAV_CALENDAR_NAME=Garoon Sync Test
 
 GAROON_START_DAYS_OFFSET=0
 GAROON_END_DAYS_OFFSET=92
-CALDAV_DRY_RUN=true
+CALDAV_DRY_RUN=false
 ```
 
-`CALDAV_URL` は実装上の環境変数名です。iCloud を使う場合も `ICLOUD_CALDAV_URL` などの別名は使わず、必ず `CALDAV_URL` を設定してください。
-また、`CALDAV_CALENDAR_NAME` は初回確認中は必ずテスト用カレンダー名にしてください。本番カレンダー名は、`dry-run` とテスト用カレンダーでの確認が終わってから使うのが安全です。
+初回確認時は `CALDAV_DRY_RUN=true` にして、必ずテスト用カレンダーで差分を見てください。
 
-### 3. イメージをビルドする
+### 3. ビルド
 
 ```bash
 docker compose build garoon-sync
 ```
 
-### 4. `dry-run` で差分を確認する
+### 4. 実行
+
+通常運用用 `.env` を使う例:
 
 ```bash
-docker compose run --rm garoon-sync
+SYNC_ENV_FILE=runtime/profiles/default/.env ./scripts/run_docker_sync.sh
 ```
-
-確認ポイント:
-
-- `data/sync_plan.json` の `create` / `update` / `delete` 件数が想定どおりか
-- `data/caldav_sync_result.json` に想定外の失敗が出ていないか
-- テスト用カレンダー名を指定しているか
-
-### 5. 問題なければ本番反映する
-
-`.env` の `CALDAV_DRY_RUN=false` に切り替えるか、コマンド側で一時上書きして実行します。
-
-```bash
-docker compose run --rm -e CALDAV_DRY_RUN=false garoon-sync
-```
-
-## 生成される主なファイル
-
-- `data/events.json`: Garoon から取得して正規化した予定一覧
-- `data/calendar.ics`: 生成した ICS
-- `data/sync_plan.json`: 今回の同期で予定されるアクション
-- `data/caldav_sync_result.json`: CalDAV への送信結果
-- `data/sync_state.json`: 次回同期の基準になる状態ファイル
 
 ## 環境変数
 
-通常利用で重要なものを先に載せています。実際のキー名は `.env.example` と実装に合わせて `CALDAV_*` です。
+主要項目:
 
-> [!IMPORTANT]
-> iCloud を同期先にする場合も、接続先 URL の環境変数名は `CALDAV_URL` を使います。`ICLOUD_CALDAV_URL` のような別名は使いません。
-
-| 環境変数 | 役割 | 通常運用の推奨値 / 補足 |
+| 変数 | 役割 | 推奨値 / 補足 |
 | --- | --- | --- |
-| `GAROON_BASE_URL` | Garoon のベース URL | 例: `https://example.cybozu.com/g` |
-| `GAROON_USERNAME` | Garoon のユーザー名 | 必須 |
-| `GAROON_PASSWORD` | Garoon のパスワード | 必須 |
-| `CALDAV_URL` | CalDAV discovery の起点 URL | iCloud なら例: `https://caldav.icloud.com` |
-| `CALDAV_USERNAME` | CalDAV ユーザー名 | iCloud 側の接続情報 |
-| `CALDAV_PASSWORD` | CalDAV パスワード | iCloud 側の接続情報 |
-| `CALDAV_CALENDAR_NAME` | 同期先カレンダー名 | 初回は必ずテスト用カレンダー名 |
+| `PROFILE_NAME` | 実行 profile 識別子 | 新規運用では必須推奨 |
+| `APP_DATA_DIR` | profile ごとの runtime ルート | 例: `runtime/profiles/tomoya` |
+| `GAROON_BASE_URL` | Garoon のベース URL | 必須 |
+| `GAROON_USERNAME` | Garoon ユーザー名 | 必須 |
+| `GAROON_PASSWORD` | Garoon パスワード | 必須 |
+| `CALDAV_URL` | CalDAV discovery 起点 URL | iCloud でも `CALDAV_URL` を使います |
+| `CALDAV_USERNAME` | CalDAV ユーザー名 | 必須 |
+| `CALDAV_PASSWORD` | CalDAV パスワード | 必須 |
+| `CALDAV_CALENDAR_NAME` | 同期先カレンダー名 | 初回はテスト用推奨 |
 | `GAROON_START_DAYS_OFFSET` | 取得開始オフセット | 通常運用は `0` |
 | `GAROON_END_DAYS_OFFSET` | 取得終了オフセット | 通常運用は `92` |
-| `CALDAV_DRY_RUN` | CalDAV へ実送信しない確認モード | 初回確認は `true`、通常運用は `false` |
+| `CALDAV_DRY_RUN` | dry-run 切り替え | 通常運用は `false` |
 
-必要に応じて見る項目:
+補助項目:
 
-| 環境変数 | 役割 | 既定値 |
+| 変数 | 役割 | 既定 |
 | --- | --- | --- |
-| `OUTPUT_JSON_PATH` | `events.json` の出力先 | `data/events.json` |
+| `OUTPUT_JSON_PATH` | `events.json` の保存先 | `<APP_DATA_DIR>/data/events.json` 相当 |
 | `LOG_LEVEL` | ログレベル | `INFO` |
-| `DRY_RUN_WARN_CREATE_COUNT` | `dry-run` で warning を出す `create` 閾値 | `10` |
-| `DRY_RUN_WARN_DELETE_COUNT` | `dry-run` で warning を出す `delete` 閾値 | `10` |
-| `CALDAV_DIAGNOSTIC_DUMP_FAILED_ICS` | create 失敗時に ICS を保存 | `false` |
-| `CALDAV_DIAGNOSTIC_DUMP_SUCCESS_ICS` | 比較用に成功相当 ICS も保存 | `false` |
-| `CALDAV_DIAGNOSTIC_DUMP_UID_LOOKUP_JSON` | UID lookup の診断 JSON を保存 | `false` |
+| `DRY_RUN_WARN_CREATE_COUNT` | dry-run warning の create 閾値 | `10` |
+| `DRY_RUN_WARN_DELETE_COUNT` | dry-run warning の delete 閾値 | `10` |
+| `CALDAV_DIAGNOSTIC_DUMP_FAILED_ICS` | 失敗 ICS 保存 | `false` |
+| `CALDAV_DIAGNOSTIC_DUMP_SUCCESS_ICS` | 成功相当 ICS 保存 | `false` |
+| `CALDAV_DIAGNOSTIC_DUMP_UID_LOOKUP_JSON` | UID lookup 診断保存 | `false` |
+| `GAROON_TARGET_USER` | Garoon 対象ユーザー絞り込み | 任意 |
+| `GAROON_TARGET_CALENDAR` | Garoon 対象カレンダー絞り込み | 任意 |
 
-推奨設定の目安:
+## 生成物
 
-初回確認:
+profile ごとの `data/` には次のファイルが保存されます。
+
+- `events.json`
+- `calendar.ics`
+- `sync_plan.json`
+- `caldav_sync_result.json`
+- `sync_state.json`
+- `run_summary.json`
+- `diagnostics/`
+- `reports/`
+- `backups/`
+
+`logs/garoon-icloud-sync.log` には profile 別ログを保存します。`journalctl` や Docker の stdout と併用できます。
+
+## run summary
+
+各 run の最後に `run_summary.json` を出力します。最低限、次の情報を含みます。
+
+- `profile`
+- `started_at`
+- `finished_at`
+- `mode`
+- `dry_run`
+- `fetch_window`
+- `result`
+- `counts.create`
+- `counts.update`
+- `counts.delete`
+- `counts.skip`
+- `warnings`
+- `error`
+
+例:
+
+```json
+{
+  "profile": "tomoya",
+  "started_at": "2026-03-16T23:30:00+09:00",
+  "finished_at": "2026-03-16T23:30:12+09:00",
+  "mode": "normal",
+  "dry_run": false,
+  "fetch_window": {
+    "start_days_offset": 0,
+    "end_days_offset": 92,
+    "start": "2026-03-16T00:00:00+09:00",
+    "end": "2026-06-16T23:59:59+09:00"
+  },
+  "result": "success",
+  "counts": {
+    "create": 1,
+    "update": 2,
+    "delete": 0,
+    "skip": 53
+  },
+  "warnings": [],
+  "error": null
+}
+```
+
+delete が 1 件以上なら `DELETE_DETECTED`、通常運用の 0..92 日を超える window なら `BACKFILL_WINDOW` が warning に残ります。
+
+## 通常運用
+
+通常運用の推奨値は次です。
 
 ```dotenv
+GAROON_START_DAYS_OFFSET=0
+GAROON_END_DAYS_OFFSET=92
+CALDAV_DRY_RUN=false
+```
+
+通常運用例:
+
+```bash
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env ./scripts/run_docker_sync.sh
+```
+
+確認コマンド例:
+
+```bash
+python -m src.sync_state_backup list --env-path runtime/profiles/tomoya/.env
+python -m src.sync_plan_inspect --env-path runtime/profiles/tomoya/.env --action create --action delete
+python -m src.caldav_sync_result_summary --env-path runtime/profiles/tomoya/.env
+```
+
+## backfill
+
+backfill は通常運用とは別設定で、一時的にだけ実施してください。通常運用用 `.env` を広い window のまま残さないのが重要です。
+
+backfill 用ファイル例:
+
+```text
+runtime/profiles/tomoya/.env
+runtime/profiles/tomoya/.env.backfill
+```
+
+`runtime/profiles/tomoya/.env.backfill` の例:
+
+```dotenv
+PROFILE_NAME=tomoya
+APP_DATA_DIR=runtime/profiles/tomoya
+GAROON_START_DAYS_OFFSET=-365
+GAROON_END_DAYS_OFFSET=183
 CALDAV_DRY_RUN=true
 ```
 
+backfill dry-run:
+
+```bash
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env.backfill ./scripts/run_docker_sync.sh
+```
+
+backfill 本番:
+
+```bash
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env.backfill CALDAV_DRY_RUN=false ./scripts/run_docker_sync.sh
+```
+
+backfill 後は、通常運用用 `.env` を必ず次へ戻してください。
+
+```dotenv
+GAROON_START_DAYS_OFFSET=0
+GAROON_END_DAYS_OFFSET=92
+CALDAV_DRY_RUN=false
+```
+
+## Docker Compose
+
+`docker-compose.yml` は次を永続化します。
+
+- `./data` for legacy single-user mode
+- `./runtime` for profile-separated runtime
+- `./logs` for legacy single-user file logs
+
+profile 別 `.env` は `SYNC_ENV_FILE` で切り替えます。
+
 通常運用:
 
-```dotenv
-GAROON_START_DAYS_OFFSET=0
-GAROON_END_DAYS_OFFSET=92
-CALDAV_DRY_RUN=false
+```bash
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env docker compose run --rm garoon-sync
 ```
 
-> [!TIP]
-> 通常運用の推奨値は `GAROON_START_DAYS_OFFSET=0`、`GAROON_END_DAYS_OFFSET=92`、`CALDAV_DRY_RUN=false` です。
-
-## 実行方法
-
-### `dry-run` 実行
+backfill:
 
 ```bash
-docker compose run --rm -e CALDAV_DRY_RUN=true garoon-sync
+SYNC_ENV_FILE=runtime/profiles/tomoya/.env.backfill docker compose run --rm garoon-sync
 ```
 
-### 通常実行
+## systemd --user
+
+template unit の例を `deploy/systemd/user/garoon-icloud-sync@.service` と `deploy/systemd/user/garoon-icloud-sync@.timer` に置いています。
+
+配置例:
 
 ```bash
-docker compose run --rm garoon-sync
+mkdir -p ~/.config/systemd/user
+install -D -m 0644 deploy/systemd/user/garoon-icloud-sync@.service ~/.config/systemd/user/garoon-icloud-sync@.service
+install -D -m 0644 deploy/systemd/user/garoon-icloud-sync@.timer ~/.config/systemd/user/garoon-icloud-sync@.timer
+systemctl --user daemon-reload
+systemctl --user enable --now garoon-icloud-sync@tomoya.timer
 ```
 
-### 環境変数を一時上書きして実行
+この template は `SYNC_ENV_FILE=runtime/profiles/%i/.env` を使うので、通常運用 profile ごとの timer を作れます。
 
-例: 取得範囲だけ一時的に広げて確認する場合
+確認:
 
 ```bash
-docker compose run --rm \
-  -e GAROON_START_DAYS_OFFSET=-30 \
-  -e GAROON_END_DAYS_OFFSET=120 \
-  -e CALDAV_DRY_RUN=true \
-  garoon-sync
+systemctl --user status garoon-icloud-sync@tomoya.service
+systemctl --user status garoon-icloud-sync@tomoya.timer
+journalctl --user -u garoon-icloud-sync@tomoya.service -n 100 --no-pager
 ```
 
-## 初回 backfill 手順
+## fail-fast と warning
 
-初回 backfill は、過去分を含めて一度だけ広範囲に投入したいときの手順です。通常運用とは分けて実施してください。
-
-ここで示す期間は例です。たとえば「1 年前から半年先まで」を一度だけ取り込み、その後に通常運用の window へ戻す、という使い方を想定しています。
-
-### 1. `sync_state.json` をバックアップする
-
-既存の `data/sync_state.json` がある場合は、先にバックアップを取ります。
-
-以下の形式で、補助 CLI をそのまま Docker Compose 経由で実行できます。
-
-```bash
-docker compose run --rm garoon-sync python -m src.sync_state_backup backup
-```
-
-### 2. 広範囲の `dry-run` を実行する
-
-```bash
-docker compose run --rm \
-  -e GAROON_START_DAYS_OFFSET=-365 \
-  -e GAROON_END_DAYS_OFFSET=183 \
-  -e CALDAV_DRY_RUN=true \
-  garoon-sync
-```
-
-### 3. 差分を確認する
-
-次を重点的に見ます。
-
-- `data/sync_plan.json` の `create` / `delete` 件数
-- `data/caldav_sync_result.json` の失敗有無
-- テスト用カレンダー上で、代表的な予定が想定どおりに扱われそうか
-
-### 4. 問題なければ広範囲の本番実行を行う
-
-```bash
-docker compose run --rm \
-  -e GAROON_START_DAYS_OFFSET=-365 \
-  -e GAROON_END_DAYS_OFFSET=183 \
-  -e CALDAV_DRY_RUN=false \
-  garoon-sync
-```
-
-### 5. 通常運用の window に戻す
-
-backfill 後は `.env` を通常運用に戻します。
-
-```dotenv
-GAROON_START_DAYS_OFFSET=0
-GAROON_END_DAYS_OFFSET=92
-CALDAV_DRY_RUN=false
-```
-
-## 通常運用手順
-
-通常運用では、今日から 3 か月先までを同期する前提で、次の設定を推奨します。
-
-```dotenv
-GAROON_START_DAYS_OFFSET=0
-GAROON_END_DAYS_OFFSET=92
-CALDAV_DRY_RUN=false
-```
-
-運用の考え方:
-
-- 毎回 broad range を取りにいかず、通常は日常同期の window だけを取得する
-- `dry-run` で差分を確認してから、本番実行や timer 運用へ移る
-- fetch window ベースの削除判定なので、通常運用の window 外にある過去イベントや遠い将来イベントを誤削除しにくい
-- Raspberry Pi では 15 分または 30 分間隔での定期実行が可能
-
-確認のために一時的に `dry-run` したい場合:
-
-```bash
-docker compose run --rm \
-  -e CALDAV_DRY_RUN=true \
-  -e GAROON_START_DAYS_OFFSET=0 \
-  -e GAROON_END_DAYS_OFFSET=92 \
-  garoon-sync
-```
-
-## Raspberry Pi / systemd timer 運用
-
-Raspberry Pi 上では、Docker Compose 実行を `systemd --user` timer から定期実行できます。
-
-- unit ファイルは `deploy/systemd/user/` にあります
-- 常時運用の詳細手順は [docs/raspberry-pi-operation.md](docs/raspberry-pi-operation.md) を参照してください
-- 15 分または 30 分間隔での運用が可能です。配布している timer 例は 30 分設定なので、必要に応じて 15 分へ調整してください
-
-配置されているファイル:
-
-- `deploy/systemd/user/garoon-sync.service`
-- `deploy/systemd/user/garoon-sync.timer`
+- state 内の `profile` が実行時 `PROFILE_NAME` と違う場合は fail-fast します
+- fail-fast 時は state を自動修復しません
+- save も反映も進めません
+- 実行開始ログには `profile`、`dry_run`、`mode`、`fetch window` を残します
+- delete、backfill window、dry-run 大量差分は warning としてログと run summary に残します
 
 ## トラブルシュート
 
-- `dry-run` で `create` が大量に出る: 初回同期や backfill では自然です。通常運用で想定より多い場合は、`CALDAV_CALENDAR_NAME` の指定先、`data/sync_state.json` の持ち込み元、`data/sync_plan.json` の件数を確認してください。いきなり本番へ進めず、まずテスト用カレンダーで差分を見直すのが安全です。
-- `404` / `412` が出た: `404` / `410` は保存済み `resource_url` が古いケース、`412` は既存 resource との衝突や state drift の可能性があります。まず `data/caldav_sync_result.json` を確認し、必要なら診断系の環境変数を有効にして `data/reports/` や `data/diagnostics/` を見てください。
-- `calendar_url` が変わった時: 実際の同期先カレンダー URL は `CALDAV_URL` と `CALDAV_CALENDAR_NAME` から毎回 discovery します。iCloud 側でカレンダーを作り直した、共有状態が変わった、見える URL が変わった、といった場合は、まず `CALDAV_CALENDAR_NAME` と接続先を確認して `dry-run` してください。過去の `sync_state.json` が別カレンダーを前提にしていると差分が大きく変わるため、必要ならバックアップ後に初回同期相当として扱います。
-- `sync_state.json` をどう扱うか: `sync_state.json` は差分同期の基準状態です。`dry-run` では更新されません。安易に削除せず、変更前にバックアップを取ってください。補助 CLI は `python -m src.sync_state_backup` で使えます。
-- start-only event の扱い: start-only timed event は iCloud 対応のため `DTEND` を補完します。時刻付き予定でも start-only でないものに end が無い場合は、自動で 30 分補完しません。Garoon 側データの性質によって見え方が変わるので、気になる予定は `data/calendar.ics` を確認してください。
-- Docker build 周りで詰まった: まず `docker compose build --no-cache garoon-sync` を試し、続けて `docker compose run --rm garoon-sync` で再確認してください。`.env` が未作成、Docker 自体が起動していない、`data/` に書き込めない、といった初歩的な要因でも止まります。
+- `sync_state profile mismatch` が出た: 別 profile の state を読んでいます。`PROFILE_NAME` と `APP_DATA_DIR`、または指定した `.env` を見直してください
+- delete が出た: すぐ本番に進めず、`sync_plan.json` と `run_summary.json` を確認してください
+- backfill warning が出た: 一時実行なら正常です。終わったら通常運用値へ戻してください
+- `404` / `412` が出た: `caldav_sync_result.json` と `reports/`、`diagnostics/` を確認してください
+- `dry-run` なのに state が進んだように見える: `dry-run` では `sync_state.json` は更新しません。確認対象は `sync_plan.json`、`caldav_sync_result.json`、`run_summary.json` です
 
-## 補足 / 詳細ドキュメント
+## 詳細運用
 
-Raspberry Pi での配置、`systemd --user` timer の有効化、`linger`、ログ確認などの詳細は [docs/raspberry-pi-operation.md](docs/raspberry-pi-operation.md) を参照してください。
-
-補助的に使える CLI:
-
-```bash
-docker compose run --rm garoon-sync python -m src.sync_state_backup list
-docker compose run --rm garoon-sync python -m src.sync_plan_inspect --action create
-docker compose run --rm garoon-sync python -m src.caldav_sync_result_summary --result-path data/caldav_sync_result.json
-```
-
-README では導入と通常運用の流れを優先し、PoC の経緯や細かな検証メモは前半から外しています。より深い挙動確認が必要な場合は、`tests/` と `src/`、および上記の補助 CLI を参照してください。
+Raspberry Pi 上での配置、`systemd --user` timer、`linger`、ログ確認は [docs/raspberry-pi-operation.md](docs/raspberry-pi-operation.md) を参照してください。
